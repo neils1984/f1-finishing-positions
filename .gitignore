@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Data (large, not version controlled)
+data/
+
+# ML runs
+runs/
+
+# MLflow
+mlruns/
+
+# OS
+.DS_Store

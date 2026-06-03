@@ -12,7 +12,7 @@ Original project plan: `plan.md`
 ## Environment
 
 - Developed in WSL2 (Ubuntu) on Windows. Run all commands in the WSL2 terminal.
-- `uv` for env management — `uv sync` to install, `uv run <cmd>` to execute.
+- `uv` for env management — `uv sync` creates a `.venv` in the project root automatically. Use `uv run <cmd>` to execute without activating the venv manually. Never use the system Python directly.
 - No Python on the Windows host; everything runs inside WSL2.
 
 ## Commands
