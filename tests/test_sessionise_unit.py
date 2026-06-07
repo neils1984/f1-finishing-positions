@@ -121,3 +121,75 @@ def test_join_intervals_adds_gap_columns():
     result = _join_intervals(laps, intervals)
     assert "gap_to_leader" in result.columns
     assert "interval_to_ahead" in result.columns
+
+
+from f1_predictor.sessionise import _join_stints, _join_pit
+
+
+def test_join_stints_adds_tyre_columns():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 4,
+        "driver_number": [1, 1, 1, 1],
+        "lap_number": [1, 2, 3, 4],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 4,
+        "lap_time": [90.0] * 4,
+    })
+    stints = pl.DataFrame({
+        "driver_number": [1, 1],
+        "stint_number": [1, 2],
+        "lap_start": [1, 3],
+        "lap_end": [2, 4],
+        "compound": ["SOFT", "MEDIUM"],
+        "tyre_age_at_start": [0, 0],
+    })
+    result = _join_stints(laps, stints)
+
+    assert "tyre_compound" in result.columns
+    assert "tyre_age_laps" in result.columns
+    assert "stint_number" in result.columns
+    assert result.shape[0] == 4
+
+    compounds = result.sort("lap_number")["tyre_compound"].to_list()
+    assert compounds == ["SOFT", "SOFT", "MEDIUM", "MEDIUM"]
+
+
+def test_join_stints_tyre_age_resets_at_stint_boundary():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 3,
+        "driver_number": [1, 1, 1],
+        "lap_number": [1, 2, 3],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 3,
+        "lap_time": [90.0] * 3,
+    })
+    stints = pl.DataFrame({
+        "driver_number": [1, 1],
+        "stint_number": [1, 2],
+        "lap_start": [1, 3],
+        "lap_end": [2, 3],
+        "compound": ["SOFT", "MEDIUM"],
+        "tyre_age_at_start": [0, 0],
+    })
+    result = _join_stints(laps, stints).sort("lap_number")
+    assert result["tyre_age_laps"].to_list() == [0, 1, 0]
+
+
+def test_join_pit_adds_pit_flags():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 4,
+        "driver_number": [1, 1, 1, 1],
+        "lap_number": [1, 2, 3, 4],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 4,
+        "lap_time": [90.0] * 4,
+    })
+    pit = pl.DataFrame({
+        "driver_number": [1],
+        "lap_number": [2],
+        "pit_duration": [22.5],
+    })
+    result = _join_pit(laps, pit)
+
+    assert "pit_this_lap" in result.columns
+    assert "stops_completed" in result.columns
+    row = result.sort("lap_number")
+    assert row["pit_this_lap"].to_list() == [False, True, False, False]
+    assert row["stops_completed"].to_list() == [0, 1, 1, 1]
