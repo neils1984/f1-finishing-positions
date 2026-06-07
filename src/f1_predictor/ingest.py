@@ -67,7 +67,9 @@ def pull_season(year: int, raw_dir: Path, force: bool = False) -> list[int]:
     keys: list[int] = []
     for session in sessions:
         circuit = session.get("circuit_short_name", "").lower()
-        if "monaco" in circuit:
+        # OpenF1 names the Monaco circuit "Monte Carlo" (not "Monaco"). Match
+        # both spellings; note Montreal/Monza must NOT match.
+        if "monaco" in circuit or "monte carlo" in circuit:
             continue
         key = int(session["session_key"])
         pull_session(key, raw_dir, force=force)

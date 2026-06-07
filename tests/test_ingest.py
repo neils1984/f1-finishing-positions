@@ -62,10 +62,14 @@ def test_pull_session_force_repulls(tmp_path):
 
 
 def test_pull_season_excludes_monaco(tmp_path):
+    # OpenF1 returns the Monaco circuit as "Monte Carlo". Montreal and Monza
+    # share the "mon" prefix and must NOT be excluded.
     sessions = [
-        {"session_key": 9001, "circuit_short_name": "Bahrain"},
-        {"session_key": 9002, "circuit_short_name": "Monaco"},
-        {"session_key": 9003, "circuit_short_name": "Spain"},
+        {"session_key": 9001, "circuit_short_name": "Sakhir"},
+        {"session_key": 9002, "circuit_short_name": "Monte Carlo"},
+        {"session_key": 9003, "circuit_short_name": "Catalunya"},
+        {"session_key": 9004, "circuit_short_name": "Montreal"},
+        {"session_key": 9005, "circuit_short_name": "Monza"},
     ]
 
     pulled = []
@@ -84,9 +88,11 @@ def test_pull_season_excludes_monaco(tmp_path):
 
         keys = pull_season(2023, tmp_path)
 
-    assert 9002 not in keys, "Monaco must be excluded"
+    assert 9002 not in keys, "Monaco (Monte Carlo) must be excluded"
     assert 9001 in keys
     assert 9003 in keys
+    assert 9004 in keys, "Montreal must NOT be excluded"
+    assert 9005 in keys, "Monza must NOT be excluded"
 
 def test_pull_season_returns_session_keys(tmp_path):
     sessions = [
