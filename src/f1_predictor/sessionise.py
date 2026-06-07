@@ -266,3 +266,90 @@ def _add_race_control_flags(lap_table: pl.DataFrame, rc_df: pl.DataFrame) -> pl.
         pl.col("lap_number").replace(red_map).alias("red_flag_active").cast(pl.Boolean),
         pl.col("lap_number").replace(lssce_map).alias("laps_since_sc_end").cast(pl.Int64),
     ])
+
+
+_RETIRED_STATUSES = {"Retired", "DNF", "DSQ", "DNS", "Accident", "Mechanical", "Collision"}
+
+
+def _add_retirements(
+    lap_table: pl.DataFrame,
+    session_result: pl.DataFrame,
+) -> pl.DataFrame:
+    """Add is_retired, retirement_lap, final_position from session_result."""
+    # All drivers get final_position from official classification
+    final_pos = session_result.select(["driver_number", "position"]).rename({"position": "final_position"})
+
+    # DNF drivers: status is not "Finished" (covers Retired, DSQ, DNS, etc.)
+    dnf_drivers = (
+        session_result.filter(~pl.col("status").str.contains("Finished"))
+        .select("driver_number")
+    )
+
+    # retirement_lap = last lap seen in laps table
+    last_laps = (
+        lap_table.group_by("driver_number")
+        .agg(pl.col("lap_number").max().alias("retirement_lap"))
+    )
+    retirement_info = dnf_drivers.join(last_laps, on="driver_number", how="left")
+
+    return (
+        lap_table
+        .join(final_pos, on="driver_number", how="left")
+        .join(retirement_info, on="driver_number", how="left")
+        .with_columns(pl.col("retirement_lap").is_not_null().alias("is_retired"))
+    )
+
+
+def _build_masks(lap_table: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Build attention_mask [n_drivers, n_laps] and target_mask [n_drivers]."""
+    drivers = sorted(lap_table["driver_number"].unique().to_list())
+    laps = sorted(lap_table["lap_number"].unique().to_list())
+    d_idx = {d: i for i, d in enumerate(drivers)}
+    l_idx = {l: i for i, l in enumerate(laps)}
+
+    attention_mask = np.ones((len(drivers), len(laps)), dtype=np.int8)
+
+    retired = lap_table.filter(pl.col("is_retired")).select(
+        ["driver_number", "retirement_lap"]
+    ).unique("driver_number")
+
+    for row in retired.iter_rows(named=True):
+        d_i = d_idx[row["driver_number"]]
+        ret_lap = row["retirement_lap"]
+        if ret_lap is not None:
+            for lap in laps:
+                if lap > ret_lap:
+                    attention_mask[d_i, l_idx[lap]] = 0
+
+    # target_mask: 0 only for DNS (never appeared in laps table) — rare
+    target_mask = np.ones(len(drivers), dtype=np.int8)
+
+    return attention_mask, target_mask
+
+
+def sessionise(session_key: int, raw_dir: Path, sessions_dir: Path) -> pl.DataFrame:
+    """Run all Stage 2 joins for one race. Save result and masks; return DataFrame."""
+    session_dir = raw_dir / str(session_key)
+    raw = _read_raw(session_dir)
+
+    df = _build_lap_table(raw["laps"])
+    df = _join_positions(df, raw["position"])
+    df = _join_intervals(df, raw["intervals"])
+    df = _join_stints(df, raw["stints"])
+    df = _join_pit(df, raw["pit"])
+    df = _add_car_data(df, raw["car_data"])
+    df = _add_race_control_flags(df, raw["race_control"])
+    df = _add_retirements(df, raw["session_result"])
+
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    out_path = sessions_dir / f"{session_key}.parquet"
+    df.write_parquet(out_path)
+
+    attention_mask, target_mask = _build_masks(df)
+    np.savez(
+        sessions_dir / f"{session_key}_masks.npz",
+        attention_mask=attention_mask,
+        target_mask=target_mask,
+    )
+
+    return df

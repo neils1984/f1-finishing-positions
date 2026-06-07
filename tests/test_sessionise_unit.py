@@ -280,3 +280,51 @@ def test_vsc_and_red_flag_active():
     result = _add_race_control_flags(laps, rc).sort("lap_number")
     assert result["vsc_active"].to_list() == [False, False, True, True, False]
     assert result["red_flag_active"].to_list() == [False, False, False, False, True]
+
+
+from f1_predictor.sessionise import _add_retirements
+
+
+def test_add_retirements_marks_dnf_drivers():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 6,
+        "driver_number": [1, 1, 1, 44, 44, 44],
+        "lap_number": [1, 2, 3, 1, 2, 3],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 6,
+        "lap_time": [90.0] * 6,
+    })
+    session_result = pl.DataFrame({
+        "driver_number": [1, 44],
+        "position": [1, 18],
+        "status": ["Finished", "Retired"],
+    })
+    result = _add_retirements(laps, session_result)
+    assert "is_retired" in result.columns
+    assert "retirement_lap" in result.columns
+    assert "final_position" in result.columns
+
+    driver44 = result.filter(pl.col("driver_number") == 44)
+    assert driver44["is_retired"].unique().to_list() == [True]
+    assert driver44["retirement_lap"].unique().to_list() == [3]
+    assert driver44["final_position"].unique().to_list() == [18]
+
+    driver1 = result.filter(pl.col("driver_number") == 1)
+    assert driver1["is_retired"].unique().to_list() == [False]
+    assert driver1["final_position"].unique().to_list() == [1]
+
+
+def test_add_retirements_retirement_lap_is_last_lap():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 4,
+        "driver_number": [55, 55, 55, 55],
+        "lap_number": [1, 2, 3, 4],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 4,
+        "lap_time": [90.0] * 4,
+    })
+    session_result = pl.DataFrame({
+        "driver_number": [55],
+        "position": [16],
+        "status": ["Retired"],
+    })
+    result = _add_retirements(laps, session_result)
+    assert result.filter(pl.col("driver_number") == 55)["retirement_lap"].unique()[0] == 4
