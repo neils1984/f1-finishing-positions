@@ -193,3 +193,34 @@ def test_join_pit_adds_pit_flags():
     row = result.sort("lap_number")
     assert row["pit_this_lap"].to_list() == [False, True, False, False]
     assert row["stops_completed"].to_list() == [0, 1, 1, 1]
+
+
+from f1_predictor.sessionise import _add_car_data
+
+
+def test_add_car_data_max_speed_per_lap():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 2,
+        "driver_number": [1, 1],
+        "lap_number": [1, 2],
+        "date_start": [
+            "2023-03-30T14:00:00+00:00",
+            "2023-03-30T14:01:30+00:00",
+        ],
+        "lap_time": [90.0, 88.5],
+    })
+    car = pl.DataFrame({
+        "driver_number": [1, 1, 1, 1],
+        "date": [
+            "2023-03-30T14:00:10+00:00",  # lap 1
+            "2023-03-30T14:00:50+00:00",  # lap 1
+            "2023-03-30T14:01:40+00:00",  # lap 2
+            "2023-03-30T14:02:10+00:00",  # lap 2
+        ],
+        "speed": [250, 310, 290, 320],
+    })
+    result = _add_car_data(laps, car)
+    assert "max_speed_kmh" in result.columns
+    row = result.sort("lap_number")
+    assert row["max_speed_kmh"][0] == 310  # lap 1
+    assert row["max_speed_kmh"][1] == 320  # lap 2

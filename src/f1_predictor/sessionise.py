@@ -152,3 +152,47 @@ def _join_pit(lap_table: pl.DataFrame, pit_df: pl.DataFrame) -> pl.DataFrame:
             .alias("stops_completed")
         )
     )
+
+
+def _add_car_data(lap_table: pl.DataFrame, car_data_df: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate max speed from car telemetry into max_speed_kmh per driver-lap."""
+    if car_data_df.is_empty():
+        return lap_table.with_columns(pl.lit(None).cast(pl.Float64).alias("max_speed_kmh"))
+
+    # Assign each telemetry sample to a lap via backward asof join on lap start time
+    laps_sorted = (
+        lap_table.with_columns(
+            pl.col("date_start")
+            .str.to_datetime(format=_DT_FMT, time_unit="us")
+            .cast(pl.Datetime("us", "UTC"))
+        )
+        .sort(["driver_number", "date_start"])
+        .select(["driver_number", "lap_number", "date_start"])
+    )
+
+    car = (
+        car_data_df.with_columns(
+            pl.col("date")
+            .str.to_datetime(format=_DT_FMT, time_unit="us")
+            .cast(pl.Datetime("us", "UTC"))
+            .alias("date_start")
+        )
+        .sort(["driver_number", "date_start"])
+        .select(["driver_number", "date_start", "speed"])
+    )
+
+    # For each telemetry sample, find which lap it belongs to (last lap started before it)
+    car_with_lap = car.join_asof(
+        laps_sorted,
+        on="date_start",
+        by="driver_number",
+        strategy="backward",
+    )
+
+    max_speed = (
+        car_with_lap.filter(pl.col("lap_number").is_not_null())
+        .group_by(["driver_number", "lap_number"])
+        .agg(pl.col("speed").max().alias("max_speed_kmh"))
+    )
+
+    return lap_table.join(max_speed, on=["driver_number", "lap_number"], how="left")
