@@ -17,7 +17,7 @@ import polars as pl
 def _read_raw(session_dir: Path) -> dict[str, pl.DataFrame]:
     """Read all endpoint Parquet files for a session into a dict."""
     endpoints = [
-        "laps", "position", "intervals", "stints", "pit",
+        "laps", "position", "intervals", "stints",
         "race_control", "session_result", "car_data", "drivers",
     ]
     raw: dict[str, pl.DataFrame] = {}
@@ -63,6 +63,9 @@ def _lap_end_times(lap_table: pl.DataFrame) -> pl.DataFrame:
 
 def _join_positions(lap_table: pl.DataFrame, pos_df: pl.DataFrame) -> pl.DataFrame:
     """Add `position` (race position at end of each lap) via backward asof join."""
+    if pos_df.is_empty():
+        return lap_table.with_columns(pl.lit(None).cast(pl.Int64).alias("position"))
+
     laps = _lap_end_times(lap_table).sort(["driver_number", "lap_end_time"])
 
     pos = (
@@ -84,6 +87,12 @@ def _join_positions(lap_table: pl.DataFrame, pos_df: pl.DataFrame) -> pl.DataFra
 
 def _join_intervals(lap_table: pl.DataFrame, intervals_df: pl.DataFrame) -> pl.DataFrame:
     """Add `gap_to_leader` and `interval_to_ahead` via backward asof join."""
+    if intervals_df.is_empty():
+        return lap_table.with_columns([
+            pl.lit(None).cast(pl.Float64).alias("gap_to_leader"),
+            pl.lit(None).cast(pl.Float64).alias("interval_to_ahead"),
+        ])
+
     laps = _lap_end_times(lap_table).sort(["driver_number", "lap_end_time"])
 
     ivl = (
@@ -106,6 +115,13 @@ def _join_intervals(lap_table: pl.DataFrame, intervals_df: pl.DataFrame) -> pl.D
 
 def _join_stints(lap_table: pl.DataFrame, stints_df: pl.DataFrame) -> pl.DataFrame:
     """Add tyre_compound, tyre_age_laps, stint_number from stints endpoint."""
+    if stints_df.is_empty():
+        return lap_table.with_columns([
+            pl.lit(None).cast(pl.Utf8).alias("tyre_compound"),
+            pl.lit(None).cast(pl.Int64).alias("tyre_age_laps"),
+            pl.lit(None).cast(pl.Int64).alias("stint_number"),
+        ])
+
     stints = stints_df.select([
         "driver_number", "stint_number", "lap_start", "lap_end",
         "compound", "tyre_age_at_start",
@@ -131,25 +147,28 @@ def _join_stints(lap_table: pl.DataFrame, stints_df: pl.DataFrame) -> pl.DataFra
     return result
 
 
-def _join_pit(lap_table: pl.DataFrame, pit_df: pl.DataFrame) -> pl.DataFrame:
-    """Add pit_this_lap (bool) and stops_completed (cumulative count) from pit endpoint."""
-    pit_flags = (
-        pit_df.select(["driver_number", "lap_number"])
-        .unique()
-        .with_columns(pl.lit(True).alias("pit_this_lap"))
-    )
+def _add_pit_from_stints(lap_table: pl.DataFrame) -> pl.DataFrame:
+    """Derive pit_this_lap and stops_completed from the stint_number column.
 
+    OpenF1 has no /pit data for 2023 (the training season) while 2024 does, so
+    pit info is derived from /stints (present for all seasons) to avoid a
+    train/test skew. A pit stop is the first lap of each stint after the first
+    (stint_number increments); stops_completed = stint_number - 1.
+
+    Requires `stint_number` to already be present (i.e. run after _join_stints).
+    """
     return (
-        lap_table
-        .join(pit_flags, on=["driver_number", "lap_number"], how="left")
-        .with_columns(pl.col("pit_this_lap").fill_null(False))
-        .sort(["driver_number", "lap_number"])
+        lap_table.sort(["driver_number", "lap_number"])
         .with_columns(
-            pl.col("pit_this_lap")
-            .cast(pl.Int32)
-            .cum_sum()
-            .over("driver_number")
-            .alias("stops_completed")
+            (pl.col("stint_number").fill_null(1) - 1).cast(pl.Int32).alias("stops_completed")
+        )
+        .with_columns(
+            (
+                (pl.col("stint_number") > 1)
+                & (pl.col("stint_number") != pl.col("stint_number").shift(1).over("driver_number"))
+            )
+            .fill_null(False)
+            .alias("pit_this_lap")
         )
     )
 
@@ -336,7 +355,7 @@ def sessionise(session_key: int, raw_dir: Path, sessions_dir: Path) -> pl.DataFr
     df = _join_positions(df, raw["position"])
     df = _join_intervals(df, raw["intervals"])
     df = _join_stints(df, raw["stints"])
-    df = _join_pit(df, raw["pit"])
+    df = _add_pit_from_stints(df)
     df = _add_car_data(df, raw["car_data"])
     df = _add_race_control_flags(df, raw["race_control"])
     df = _add_retirements(df, raw["session_result"])

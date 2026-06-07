@@ -123,7 +123,7 @@ def test_join_intervals_adds_gap_columns():
     assert "interval_to_ahead" in result.columns
 
 
-from f1_predictor.sessionise import _join_stints, _join_pit
+from f1_predictor.sessionise import _join_stints, _add_pit_from_stints
 
 
 def test_join_stints_adds_tyre_columns():
@@ -173,26 +173,80 @@ def test_join_stints_tyre_age_resets_at_stint_boundary():
     assert result["tyre_age_laps"].to_list() == [0, 1, 0]
 
 
-def test_join_pit_adds_pit_flags():
+def test_add_pit_from_stints_derives_flags():
+    # After _join_stints the lap table carries stint_number. A new stint
+    # (number > 1) starting IS a pit stop; stops_completed = stint_number - 1.
     laps = pl.DataFrame({
         "session_key": [9161] * 4,
         "driver_number": [1, 1, 1, 1],
         "lap_number": [1, 2, 3, 4],
-        "date_start": ["2023-01-01T14:00:00+00:00"] * 4,
-        "lap_time": [90.0] * 4,
+        "stint_number": [1, 2, 2, 2],
     })
-    pit = pl.DataFrame({
-        "driver_number": [1],
-        "lap_number": [2],
-        "pit_duration": [22.5],
-    })
-    result = _join_pit(laps, pit)
+    result = _add_pit_from_stints(laps).sort("lap_number")
 
     assert "pit_this_lap" in result.columns
     assert "stops_completed" in result.columns
-    row = result.sort("lap_number")
-    assert row["pit_this_lap"].to_list() == [False, True, False, False]
-    assert row["stops_completed"].to_list() == [0, 1, 1, 1]
+    assert result["pit_this_lap"].to_list() == [False, True, False, False]
+    assert result["stops_completed"].to_list() == [0, 1, 1, 1]
+
+
+def test_add_pit_from_stints_two_stops():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 6,
+        "driver_number": [1] * 6,
+        "lap_number": [1, 2, 3, 4, 5, 6],
+        "stint_number": [1, 1, 2, 2, 3, 3],
+    })
+    result = _add_pit_from_stints(laps).sort("lap_number")
+    assert result["pit_this_lap"].to_list() == [False, False, True, False, True, False]
+    assert result["stops_completed"].to_list() == [0, 0, 1, 1, 2, 2]
+
+
+def test_add_pit_from_stints_no_stops():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 3,
+        "driver_number": [1] * 3,
+        "lap_number": [1, 2, 3],
+        "stint_number": [1, 1, 1],
+    })
+    result = _add_pit_from_stints(laps).sort("lap_number")
+    assert result["pit_this_lap"].to_list() == [False, False, False]
+    assert result["stops_completed"].to_list() == [0, 0, 0]
+
+
+def test_add_pit_from_stints_independent_per_driver():
+    laps = pl.DataFrame({
+        "session_key": [9161] * 4,
+        "driver_number": [1, 1, 44, 44],
+        "lap_number": [1, 2, 1, 2],
+        "stint_number": [1, 2, 1, 1],
+    })
+    result = _add_pit_from_stints(laps).sort(["driver_number", "lap_number"])
+    # driver 1 pits on lap 2; driver 44 never pits
+    assert result["pit_this_lap"].to_list() == [False, True, False, False]
+    assert result["stops_completed"].to_list() == [0, 1, 0, 0]
+
+
+def test_join_positions_empty_input():
+    result = _join_positions(make_base_laps(), pl.DataFrame())
+    assert "position" in result.columns
+    assert result.shape[0] == 6
+    assert result["position"].null_count() == 6
+
+
+def test_join_intervals_empty_input():
+    result = _join_intervals(make_base_laps(), pl.DataFrame())
+    assert "gap_to_leader" in result.columns
+    assert "interval_to_ahead" in result.columns
+    assert result.shape[0] == 6
+
+
+def test_join_stints_empty_input():
+    result = _join_stints(make_base_laps(), pl.DataFrame())
+    assert "tyre_compound" in result.columns
+    assert "tyre_age_laps" in result.columns
+    assert "stint_number" in result.columns
+    assert result.shape[0] == 6
 
 
 from f1_predictor.sessionise import _add_car_data
