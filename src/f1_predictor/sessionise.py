@@ -36,19 +36,30 @@ def _build_lap_table(laps: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-_DT_FMT = "%Y-%m-%dT%H:%M:%S%:z"
+# %.f makes fractional seconds optional: real OpenF1 timestamps carry them
+# (e.g. ...:38.500000+00:00) while some values / synthetic fixtures do not.
+_DT_FMT = "%Y-%m-%dT%H:%M:%S%.f%:z"
 _FAR_FUTURE = "2099-01-01T00:00:00+00:00"
+
+
+def _ensure_utc(df: pl.DataFrame, col: str) -> pl.DataFrame:
+    """Parse a string timestamp column to UTC datetime; pass through if already datetime.
+
+    Idempotent: _lap_end_times is called by both _join_positions and
+    _join_intervals on the same evolving lap_table, so date_start may already
+    have been converted by an earlier join.
+    """
+    if df.schema[col] == pl.String:
+        return df.with_columns(
+            pl.col(col).str.to_datetime(format=_DT_FMT, time_unit="us").cast(pl.Datetime("us", "UTC"))
+        )
+    return df
 
 
 def _lap_end_times(lap_table: pl.DataFrame) -> pl.DataFrame:
     """Add lap_end_time column: start of the next lap per driver (far future for last lap)."""
     return (
-        lap_table.sort(["driver_number", "lap_number"])
-        .with_columns(
-            pl.col("date_start")
-            .str.to_datetime(format=_DT_FMT, time_unit="us")
-            .cast(pl.Datetime("us", "UTC"))
-        )
+        _ensure_utc(lap_table.sort(["driver_number", "lap_number"]), "date_start")
         .with_columns(
             pl.col("date_start")
             .shift(-1)
@@ -180,11 +191,7 @@ def _add_car_data(lap_table: pl.DataFrame, car_data_df: pl.DataFrame) -> pl.Data
 
     # Assign each telemetry sample to a lap via backward asof join on lap start time
     laps_sorted = (
-        lap_table.with_columns(
-            pl.col("date_start")
-            .str.to_datetime(format=_DT_FMT, time_unit="us")
-            .cast(pl.Datetime("us", "UTC"))
-        )
+        _ensure_utc(lap_table, "date_start")
         .sort(["driver_number", "date_start"])
         .select(["driver_number", "lap_number", "date_start"])
     )
@@ -287,35 +294,60 @@ def _add_race_control_flags(lap_table: pl.DataFrame, rc_df: pl.DataFrame) -> pl.
     ])
 
 
-_RETIRED_STATUSES = {"Retired", "DNF", "DSQ", "DNS", "Accident", "Mechanical", "Collision"}
-
-
 def _add_retirements(
     lap_table: pl.DataFrame,
     session_result: pl.DataFrame,
 ) -> pl.DataFrame:
-    """Add is_retired, retirement_lap, final_position from session_result."""
-    # All drivers get final_position from official classification
-    final_pos = session_result.select(["driver_number", "position"]).rename({"position": "final_position"})
+    """Add is_retired, retirement_lap, final_position from session_result.
 
-    # DNF drivers: status is not "Finished" (covers Retired, DSQ, DNS, etc.)
-    dnf_drivers = (
-        session_result.filter(~pl.col("status").str.contains("Finished"))
-        .select("driver_number")
+    OpenF1's session_result flags non-finishers with boolean dnf/dns/dsq columns
+    and leaves their `position` null. The spec requires every driver to keep an
+    official classification position in laps-completed order, so unclassified
+    drivers are ranked after the finishers by number_of_laps (descending).
+    """
+    sr = session_result.with_columns(
+        (
+            pl.col("dnf").fill_null(False)
+            | pl.col("dns").fill_null(False)
+            | pl.col("dsq").fill_null(False)
+        ).alias("is_retired")
     )
 
-    # retirement_lap = last lap seen in laps table
+    classified = sr.filter(pl.col("position").is_not_null())
+    max_pos = classified.select(pl.col("position").max()).item()
+    max_pos = max_pos if max_pos is not None else 0
+
+    # Unclassified (null position): order by laps completed, place after finishers.
+    unclassified = (
+        sr.filter(pl.col("position").is_null())
+        .sort("number_of_laps", descending=True, nulls_last=True)
+        .with_columns((max_pos + pl.int_range(1, pl.len() + 1)).cast(pl.Int64).alias("position"))
+    )
+
+    full = pl.concat([classified, unclassified], how="vertical")
+    final_info = full.select(
+        "driver_number",
+        pl.col("position").alias("final_position"),
+        "is_retired",
+    )
+
+    # retirement_lap = last lap a driver actually completed (only for retirees).
     last_laps = (
         lap_table.group_by("driver_number")
         .agg(pl.col("lap_number").max().alias("retirement_lap"))
     )
-    retirement_info = dnf_drivers.join(last_laps, on="driver_number", how="left")
 
     return (
         lap_table
-        .join(final_pos, on="driver_number", how="left")
-        .join(retirement_info, on="driver_number", how="left")
-        .with_columns(pl.col("retirement_lap").is_not_null().alias("is_retired"))
+        .join(final_info, on="driver_number", how="left")
+        .join(last_laps, on="driver_number", how="left")
+        .with_columns(pl.col("is_retired").fill_null(False))
+        .with_columns(
+            pl.when(pl.col("is_retired"))
+            .then(pl.col("retirement_lap"))
+            .otherwise(None)
+            .alias("retirement_lap")
+        )
     )
 
 

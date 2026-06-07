@@ -110,6 +110,26 @@ def test_join_positions_picks_last_reading_before_lap_end():
     assert driver1_lap1["position"][0] == 1, "should pick position 1 (last reading in lap 1)"
 
 
+def test_join_intervals_accepts_datetime_date_start():
+    # In the full pipeline _join_positions runs first and converts date_start to
+    # datetime in place; _join_intervals (via _lap_end_times) must accept an
+    # already-datetime date_start instead of re-parsing it as a string.
+    laps = make_base_laps().with_columns(
+        pl.col("date_start")
+        .str.to_datetime(format="%Y-%m-%dT%H:%M:%S%.f%:z", time_unit="us")
+        .cast(pl.Datetime("us", "UTC"))
+    )
+    intervals = pl.DataFrame({
+        "driver_number": [1, 44],
+        "date": ["2023-03-30T14:01:25+00:00", "2023-03-30T14:01:27+00:00"],
+        "gap_to_leader": [0.0, 1.234],
+        "interval": [None, 1.234],
+    })
+    result = _join_intervals(laps, intervals)
+    assert "gap_to_leader" in result.columns
+    assert result.shape[0] == 6
+
+
 def test_join_intervals_adds_gap_columns():
     laps = make_base_laps()
     intervals = pl.DataFrame({
@@ -339,6 +359,21 @@ def test_vsc_and_red_flag_active():
 from f1_predictor.sessionise import _add_retirements
 
 
+def _session_result(rows: list[dict]) -> pl.DataFrame:
+    """Build a session_result frame mirroring OpenF1's real schema."""
+    return pl.DataFrame(
+        rows,
+        schema={
+            "driver_number": pl.Int64,
+            "position": pl.Int64,         # null for DNF/DNS/DSQ
+            "number_of_laps": pl.Int64,
+            "dnf": pl.Boolean,
+            "dns": pl.Boolean,
+            "dsq": pl.Boolean,
+        },
+    )
+
+
 def test_add_retirements_marks_dnf_drivers():
     laps = pl.DataFrame({
         "session_key": [9161] * 6,
@@ -347,11 +382,11 @@ def test_add_retirements_marks_dnf_drivers():
         "date_start": ["2023-01-01T14:00:00+00:00"] * 6,
         "lap_time": [90.0] * 6,
     })
-    session_result = pl.DataFrame({
-        "driver_number": [1, 44],
-        "position": [1, 18],
-        "status": ["Finished", "Retired"],
-    })
+    # Driver 44 retired (DNF) → null position in OpenF1 → ranked after finishers.
+    session_result = _session_result([
+        {"driver_number": 1, "position": 1, "number_of_laps": 3, "dnf": False, "dns": False, "dsq": False},
+        {"driver_number": 44, "position": None, "number_of_laps": 3, "dnf": True, "dns": False, "dsq": False},
+    ])
     result = _add_retirements(laps, session_result)
     assert "is_retired" in result.columns
     assert "retirement_lap" in result.columns
@@ -360,11 +395,13 @@ def test_add_retirements_marks_dnf_drivers():
     driver44 = result.filter(pl.col("driver_number") == 44)
     assert driver44["is_retired"].unique().to_list() == [True]
     assert driver44["retirement_lap"].unique().to_list() == [3]
-    assert driver44["final_position"].unique().to_list() == [18]
+    # Ranked immediately after the single finisher (max classified position 1).
+    assert driver44["final_position"].unique().to_list() == [2]
 
     driver1 = result.filter(pl.col("driver_number") == 1)
     assert driver1["is_retired"].unique().to_list() == [False]
     assert driver1["final_position"].unique().to_list() == [1]
+    assert driver1["retirement_lap"].unique().to_list() == [None]
 
 
 def test_add_retirements_retirement_lap_is_last_lap():
@@ -375,10 +412,33 @@ def test_add_retirements_retirement_lap_is_last_lap():
         "date_start": ["2023-01-01T14:00:00+00:00"] * 4,
         "lap_time": [90.0] * 4,
     })
-    session_result = pl.DataFrame({
-        "driver_number": [55],
-        "position": [16],
-        "status": ["Retired"],
-    })
+    session_result = _session_result([
+        {"driver_number": 55, "position": None, "number_of_laps": 4, "dnf": True, "dns": False, "dsq": False},
+    ])
     result = _add_retirements(laps, session_result)
-    assert result.filter(pl.col("driver_number") == 55)["retirement_lap"].unique()[0] == 4
+    row = result.filter(pl.col("driver_number") == 55)
+    assert row["retirement_lap"].unique()[0] == 4
+    # Only retiree, no finishers → ranked first among unclassified.
+    assert row["final_position"].unique()[0] == 1
+
+
+def test_add_retirements_ranks_unclassified_by_laps():
+    # One finisher and two DNFs; the DNF with more laps gets the better position.
+    laps = pl.DataFrame({
+        "session_key": [9161] * 9,
+        "driver_number": [1, 1, 1, 20, 20, 20, 10, 10, 10],
+        "lap_number": [1, 2, 3, 1, 2, 3, 1, 2, 3],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 9,
+        "lap_time": [90.0] * 9,
+    })
+    session_result = _session_result([
+        {"driver_number": 1, "position": 1, "number_of_laps": 57, "dnf": False, "dns": False, "dsq": False},
+        {"driver_number": 20, "position": None, "number_of_laps": 40, "dnf": True, "dns": False, "dsq": False},
+        {"driver_number": 10, "position": None, "number_of_laps": 12, "dnf": True, "dns": False, "dsq": False},
+    ])
+    result = _add_retirements(laps, session_result)
+    fp = {r["driver_number"]: r["final_position"]
+          for r in result.select(["driver_number", "final_position"]).unique().iter_rows(named=True)}
+    assert fp[1] == 1
+    assert fp[20] == 2   # 40 laps → ranked above the 12-lap retiree
+    assert fp[10] == 3
