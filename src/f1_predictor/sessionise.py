@@ -196,3 +196,73 @@ def _add_car_data(lap_table: pl.DataFrame, car_data_df: pl.DataFrame) -> pl.Data
     )
 
     return lap_table.join(max_speed, on=["driver_number", "lap_number"], how="left")
+
+
+def _parse_flag_windows(rc: pl.DataFrame, deploy_substr: str, end_substr: str) -> list[tuple[int, int]]:
+    """Return list of (start_lap, end_lap) where a flag regime was active."""
+    deploy_laps = sorted(
+        rc.filter(pl.col("message").str.contains(deploy_substr))["lap_number"]
+        .drop_nulls()
+        .to_list()
+    )
+    end_laps = sorted(
+        rc.filter(pl.col("message").str.contains(end_substr))["lap_number"]
+        .drop_nulls()
+        .to_list()
+    )
+    # Pair each deployment with the next ending
+    windows = list(zip(deploy_laps, end_laps))
+    return windows
+
+
+def _add_race_control_flags(lap_table: pl.DataFrame, rc_df: pl.DataFrame) -> pl.DataFrame:
+    """Add sc_active, vsc_active, red_flag_active, laps_since_sc_end."""
+    if rc_df.is_empty():
+        return lap_table.with_columns([
+            pl.lit(False).alias("sc_active"),
+            pl.lit(False).alias("vsc_active"),
+            pl.lit(False).alias("red_flag_active"),
+            pl.lit(0).cast(pl.Int64).alias("laps_since_sc_end"),
+        ])
+
+    sc_windows = _parse_flag_windows(rc_df, "SAFETY CAR DEPLOYED", "SAFETY CAR IN THIS LAP")
+    vsc_windows = _parse_flag_windows(rc_df, "VIRTUAL SAFETY CAR DEPLOYED", "VIRTUAL SAFETY CAR ENDING")
+
+    red_flag_laps = set(
+        rc_df.filter(pl.col("flag") == "RED")["lap_number"].drop_nulls().to_list()
+    )
+
+    def in_any_window(lap: int, windows: list[tuple[int, int]]) -> bool:
+        return any(start <= lap <= end for start, end in windows)
+
+    # SC end laps drive laps_since_sc_end. The window is inclusive, so the
+    # "SAFETY CAR IN THIS LAP" lap is itself SC-active (laps_since == 0); laps
+    # after it count up from that end lap.
+    sc_end_laps = sorted(lap for _, lap in sc_windows)
+
+    all_laps = sorted(lap_table["lap_number"].unique().to_list())
+
+    sc_map: dict[int, bool] = {}
+    vsc_map: dict[int, bool] = {}
+    red_map: dict[int, bool] = {}
+    lssce_map: dict[int, int] = {}
+
+    for lap in all_laps:
+        sc_now = in_any_window(lap, sc_windows)
+        sc_map[lap] = sc_now
+        vsc_map[lap] = in_any_window(lap, vsc_windows)
+        red_map[lap] = lap in red_flag_laps
+
+        # 0 while SC is active; after it ends, count laps since the end lap.
+        if sc_now:
+            lssce_map[lap] = 0
+        else:
+            prior_ends = [e for e in sc_end_laps if e <= lap]
+            lssce_map[lap] = (lap - max(prior_ends)) if prior_ends else 0
+
+    return lap_table.with_columns([
+        pl.col("lap_number").replace(sc_map).alias("sc_active").cast(pl.Boolean),
+        pl.col("lap_number").replace(vsc_map).alias("vsc_active").cast(pl.Boolean),
+        pl.col("lap_number").replace(red_map).alias("red_flag_active").cast(pl.Boolean),
+        pl.col("lap_number").replace(lssce_map).alias("laps_since_sc_end").cast(pl.Int64),
+    ])

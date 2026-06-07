@@ -224,3 +224,59 @@ def test_add_car_data_max_speed_per_lap():
     row = result.sort("lap_number")
     assert row["max_speed_kmh"][0] == 310  # lap 1
     assert row["max_speed_kmh"][1] == 320  # lap 2
+
+
+from f1_predictor.sessionise import _add_race_control_flags
+
+
+def make_rc_events(*rows: dict) -> pl.DataFrame:
+    return pl.DataFrame(rows, schema={
+        "lap_number": pl.Int64,
+        "category": pl.Utf8,
+        "message": pl.Utf8,
+        "flag": pl.Utf8,
+    })
+
+
+def make_5lap_table() -> pl.DataFrame:
+    return pl.DataFrame({
+        "session_key": [9161] * 5,
+        "driver_number": [1] * 5,
+        "lap_number": list(range(1, 6)),
+        "date_start": ["2023-03-30T14:00:00+00:00"] * 5,
+        "lap_time": [90.0] * 5,
+    })
+
+
+def test_sc_active_marks_correct_laps():
+    laps = make_5lap_table()
+    rc = make_rc_events(
+        {"lap_number": 2, "category": "SafetyCar", "message": "SAFETY CAR DEPLOYED", "flag": "SC"},
+        {"lap_number": 4, "category": "SafetyCar", "message": "SAFETY CAR IN THIS LAP", "flag": "SC"},
+    )
+    result = _add_race_control_flags(laps, rc)
+    sc = result.sort("lap_number")["sc_active"].to_list()
+    assert sc == [False, True, True, True, False]
+
+
+def test_laps_since_sc_end_increments():
+    laps = make_5lap_table()
+    rc = make_rc_events(
+        {"lap_number": 1, "category": "SafetyCar", "message": "SAFETY CAR DEPLOYED", "flag": "SC"},
+        {"lap_number": 2, "category": "SafetyCar", "message": "SAFETY CAR IN THIS LAP", "flag": "SC"},
+    )
+    result = _add_race_control_flags(laps, rc).sort("lap_number")
+    lssce = result["laps_since_sc_end"].to_list()
+    assert lssce == [0, 0, 1, 2, 3]
+
+
+def test_vsc_and_red_flag_active():
+    laps = make_5lap_table()
+    rc = make_rc_events(
+        {"lap_number": 3, "category": "SafetyCar", "message": "VIRTUAL SAFETY CAR DEPLOYED", "flag": "VSC"},
+        {"lap_number": 4, "category": "SafetyCar", "message": "VIRTUAL SAFETY CAR ENDING", "flag": "VSC"},
+        {"lap_number": 5, "category": "Flag", "message": "RED FLAG", "flag": "RED"},
+    )
+    result = _add_race_control_flags(laps, rc).sort("lap_number")
+    assert result["vsc_active"].to_list() == [False, False, True, True, False]
+    assert result["red_flag_active"].to_list() == [False, False, False, False, True]
