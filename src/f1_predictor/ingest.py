@@ -8,6 +8,9 @@ import requests
 
 OPENF1_BASE = "https://api.openf1.org/v1"
 
+# Pit data is NOT pulled directly. OpenF1 has no /pit data for 2023 (the entire
+# training season) while 2024 does — using /pit would skew train vs val/test.
+# pit_this_lap / stops_completed are derived from /stints in Stage 2 instead.
 ENDPOINTS = [
     "sessions",
     "drivers",
@@ -15,11 +18,33 @@ ENDPOINTS = [
     "position",
     "intervals",
     "stints",
-    "pit",
     "race_control",
     "session_result",
     "car_data",
 ]
+
+_BASE_DELAY = 0.3       # seconds between requests (politeness / rate limiting)
+_MAX_RETRIES = 5        # attempts on HTTP 429 before giving up
+
+
+def _fetch(s: requests.Session, url: str) -> list[dict]:
+    """GET a JSON list endpoint, tolerating OpenF1's quirks.
+
+    - OpenF1 answers zero-row queries with 404 {"detail": "No results found."},
+      so a 404 means "no data" → empty list, not an error.
+    - 429 (rate limited) is retried with exponential backoff.
+    """
+    for attempt in range(_MAX_RETRIES):
+        resp = s.get(url, timeout=30)
+        if resp.status_code == 404:
+            return []
+        if resp.status_code == 429:
+            time.sleep(_BASE_DELAY * (2 ** attempt))
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    resp.raise_for_status()  # exhausted retries while still rate-limited
+    return resp.json()
 
 
 def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
@@ -36,9 +61,7 @@ def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
     with requests.Session() as s:
         for endpoint in ENDPOINTS:
             url = f"{OPENF1_BASE}/{endpoint}?session_key={session_key}"
-            resp = s.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
+            data = _fetch(s, url)
 
             # infer_schema_length=None scans all rows so mixed-type columns
             # (e.g. /intervals gap_to_leader: float or "+1 LAP" for lapped
@@ -47,7 +70,7 @@ def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
             df.write_parquet(session_dir / f"{endpoint}.parquet")
             row_counts[endpoint] = len(df)
 
-            time.sleep(0.2)
+            time.sleep(_BASE_DELAY)
 
     meta = {
         "session_key": session_key,
@@ -58,7 +81,12 @@ def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
 
 
 def pull_season(year: int, raw_dir: Path, force: bool = False) -> list[int]:
-    """Pull all race sessions for a season. Skips Monaco. Returns session keys."""
+    """Pull all Grand Prix race sessions for a season. Returns session keys.
+
+    The year=...&session_type=Race query also returns Sprint sessions; only the
+    main race (session_name == "Race") is kept. Monaco is excluded entirely
+    (OpenF1 names its circuit "Monte Carlo").
+    """
     with requests.Session() as s:
         resp = s.get(
             f"{OPENF1_BASE}/sessions?year={year}&session_type=Race",
@@ -69,6 +97,9 @@ def pull_season(year: int, raw_dir: Path, force: bool = False) -> list[int]:
 
     keys: list[int] = []
     for session in sessions:
+        # Keep only the main Grand Prix race; drop Sprints.
+        if session.get("session_name") != "Race":
+            continue
         circuit = session.get("circuit_short_name", "").lower()
         # OpenF1 names the Monaco circuit "Monte Carlo" (not "Monaco"). Match
         # both spellings; note Montreal/Monza must NOT match.
@@ -77,6 +108,6 @@ def pull_season(year: int, raw_dir: Path, force: bool = False) -> list[int]:
         key = int(session["session_key"])
         pull_session(key, raw_dir, force=force)
         keys.append(key)
-        time.sleep(0.2)
+        time.sleep(_BASE_DELAY)
 
     return keys
