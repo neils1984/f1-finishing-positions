@@ -40,7 +40,10 @@ def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
             resp.raise_for_status()
             data = resp.json()
 
-            df = pl.DataFrame(data) if data else pl.DataFrame()
+            # infer_schema_length=None scans all rows so mixed-type columns
+            # (e.g. /intervals gap_to_leader: float or "+1 LAP" for lapped
+            # drivers) resolve to a String supertype instead of raising.
+            df = pl.DataFrame(data, infer_schema_length=None) if data else pl.DataFrame()
             df.write_parquet(session_dir / f"{endpoint}.parquet")
             row_counts[endpoint] = len(df)
 

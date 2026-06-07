@@ -38,6 +38,31 @@ def test_pull_session_creates_parquets(tmp_path):
     assert meta["session_key"] == 9161
     assert "pull_timestamp" in meta
 
+def test_pull_session_handles_mixed_type_column(tmp_path):
+    # OpenF1 /intervals reports gap_to_leader as a float for most drivers but a
+    # string like "+1 LAP" for lapped drivers — and lapped rows can appear well
+    # past the first 100 rows, defeating Polars' default schema inference.
+    mixed_rows = [{"driver_number": 1, "gap_to_leader": float(i)} for i in range(150)]
+    mixed_rows[140]["gap_to_leader"] = "+1 LAP"
+
+    def fake_get(url, **kwargs):
+        if "/intervals" in url:
+            return make_mock_response(mixed_rows)
+        return make_mock_response([{"session_key": 9161}])
+
+    with patch("f1_predictor.ingest.requests.Session") as MockSession:
+        session_obj = MagicMock()
+        session_obj.get.side_effect = fake_get
+        MockSession.return_value.__enter__ = lambda s: session_obj
+        MockSession.return_value.__exit__ = MagicMock(return_value=False)
+        # Must not raise ComputeError on the mixed-type column.
+        pull_session(9161, tmp_path)
+
+    intervals = pl.read_parquet(tmp_path / "9161" / "intervals.parquet")
+    assert intervals.height == 150
+    assert "+1 LAP" in intervals["gap_to_leader"].to_list()
+
+
 def test_pull_session_skips_if_cached(tmp_path):
     session_dir = tmp_path / "9161"
     session_dir.mkdir()
