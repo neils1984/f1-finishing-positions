@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import json
 import polars as pl
-from f1_predictor.ingest import pull_session, ENDPOINTS
+from f1_predictor.ingest import pull_session, pull_season, ENDPOINTS
 
 def make_mock_response(data: list[dict]) -> MagicMock:
     m = MagicMock()
@@ -59,3 +59,50 @@ def test_pull_session_force_repulls(tmp_path):
         MockSession.return_value.__exit__ = MagicMock(return_value=False)
         pull_session(9161, tmp_path, force=True)
         assert session_obj.get.called
+
+
+def test_pull_season_excludes_monaco(tmp_path):
+    sessions = [
+        {"session_key": 9001, "circuit_short_name": "Bahrain"},
+        {"session_key": 9002, "circuit_short_name": "Monaco"},
+        {"session_key": 9003, "circuit_short_name": "Spain"},
+    ]
+
+    pulled = []
+
+    def fake_pull_session(key, raw_dir, force=False):
+        pulled.append(key)
+
+    with (
+        patch("f1_predictor.ingest.requests.Session") as MockSession,
+        patch("f1_predictor.ingest.pull_session", side_effect=fake_pull_session),
+    ):
+        session_obj = MagicMock()
+        session_obj.get.return_value = make_mock_response(sessions)
+        MockSession.return_value.__enter__ = lambda s: session_obj
+        MockSession.return_value.__exit__ = MagicMock(return_value=False)
+
+        keys = pull_season(2023, tmp_path)
+
+    assert 9002 not in keys, "Monaco must be excluded"
+    assert 9001 in keys
+    assert 9003 in keys
+
+def test_pull_season_returns_session_keys(tmp_path):
+    sessions = [
+        {"session_key": 9001, "circuit_short_name": "Bahrain"},
+        {"session_key": 9003, "circuit_short_name": "Spain"},
+    ]
+
+    with (
+        patch("f1_predictor.ingest.requests.Session") as MockSession,
+        patch("f1_predictor.ingest.pull_session"),
+    ):
+        session_obj = MagicMock()
+        session_obj.get.return_value = make_mock_response(sessions)
+        MockSession.return_value.__enter__ = lambda s: session_obj
+        MockSession.return_value.__exit__ = MagicMock(return_value=False)
+
+        keys = pull_season(2023, tmp_path)
+
+    assert keys == [9001, 9003]

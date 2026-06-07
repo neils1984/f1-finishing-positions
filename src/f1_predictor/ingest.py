@@ -52,3 +52,26 @@ def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
         "row_counts": row_counts,
     }
     meta_path.write_text(json.dumps(meta, indent=2))
+
+
+def pull_season(year: int, raw_dir: Path, force: bool = False) -> list[int]:
+    """Pull all race sessions for a season. Skips Monaco. Returns session keys."""
+    with requests.Session() as s:
+        resp = s.get(
+            f"{OPENF1_BASE}/sessions?year={year}&session_type=Race",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        sessions = resp.json()
+
+    keys: list[int] = []
+    for session in sessions:
+        circuit = session.get("circuit_short_name", "").lower()
+        if "monaco" in circuit:
+            continue
+        key = int(session["session_key"])
+        pull_session(key, raw_dir, force=force)
+        keys.append(key)
+        time.sleep(0.2)
+
+    return keys
