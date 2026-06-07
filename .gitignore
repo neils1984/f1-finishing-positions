@@ -16,3 +16,6 @@ mlruns/
 
 # OS
 .DS_Store
+
+# Claude Code local settings / worktrees
+.claude/
