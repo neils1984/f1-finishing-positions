@@ -90,3 +90,60 @@ def test_distance_remaining_km_uses_circuit_length():
 def test_distance_remaining_km_null_when_circuit_unknown():
     df = _add_active_and_distance(_mini_sessionised(), circuit_length=None)
     assert df["distance_remaining_km"].null_count() == df.height
+
+
+import math
+from f1_predictor.features import _add_positions_gained, _add_pace_deltas, _add_gaps_ahead
+
+
+def test_positions_gained_from_grid_sign():
+    df = pl.DataFrame({
+        "driver_number": [1, 2, 3],
+        "lap_number": [5, 5, 5],
+        "position": [1, 2, 3],
+    })
+    grid = {1: 3, 2: 2, 3: 1}  # driver 1 started P3 now P1 -> gained 2
+    out = _add_positions_gained(df, grid).sort("driver_number")
+    assert out["positions_gained_from_grid"].to_list() == [2, 0, -2]
+
+
+def test_pace_deltas_to_ahead_and_behind():
+    # One lap, three cars by position with known lap_times.
+    df = pl.DataFrame({
+        "driver_number": [1, 2, 3],
+        "lap_number": [5, 5, 5],
+        "position": [1, 2, 3],
+        "lap_time": [88.0, 89.5, 91.0],
+    })
+    out = _add_pace_deltas(df).sort("position")
+    # P2 vs ahead (P1): 89.5 - 88.0 = 1.5 ; vs behind (P3): 89.5 - 91.0 = -1.5
+    p2 = out.filter(pl.col("position") == 2)
+    assert p2["last_lap_pace_delta_to_ahead"][0] == pytest.approx(1.5)
+    assert p2["last_lap_pace_delta_to_behind"][0] == pytest.approx(-1.5)
+    # Leader has no car ahead -> null ahead delta
+    p1 = out.filter(pl.col("position") == 1)
+    assert p1["last_lap_pace_delta_to_ahead"][0] is None
+    # Last car has no car behind -> null behind delta
+    p3 = out.filter(pl.col("position") == 3)
+    assert p3["last_lap_pace_delta_to_behind"][0] is None
+
+
+def test_gaps_ahead_mean_and_stdev():
+    # Positions 1..4 with cumulative gap_to_leader 0, 1, 3, 6 -> inter-car gaps 1,2,3.
+    df = pl.DataFrame({
+        "driver_number": [1, 2, 3, 4],
+        "lap_number": [5, 5, 5, 5],
+        "position": [1, 2, 3, 4],
+        "gap_to_leader": [0.0, 1.0, 3.0, 6.0],
+    })
+    out = _add_gaps_ahead(df).sort("position")
+    m = out["mean_gap_cars_ahead"].to_list()
+    s = out["stdev_gap_cars_ahead"].to_list()
+    # Leader (P1): no cars ahead -> 0, 0
+    assert m[0] == pytest.approx(0.0) and s[0] == pytest.approx(0.0)
+    # P2: cars ahead = {P1}; no inter-car gap -> 0, 0
+    assert m[1] == pytest.approx(0.0) and s[1] == pytest.approx(0.0)
+    # P3: inter-car gaps among {P1,P2} = [1] -> mean 1, stdev 0
+    assert m[2] == pytest.approx(1.0) and s[2] == pytest.approx(0.0)
+    # P4: inter-car gaps among {P1,P2,P3} = [1,2] -> mean 1.5, stdev 0.5 (population)
+    assert m[3] == pytest.approx(1.5) and s[3] == pytest.approx(0.5)
