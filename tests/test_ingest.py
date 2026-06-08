@@ -38,10 +38,11 @@ def test_pull_session_creates_parquets(tmp_path):
     assert meta["session_key"] == 9161
     assert "pull_timestamp" in meta
 
-def _status_response(status_code, data):
+def _status_response(status_code, data, headers=None):
     m = MagicMock()
     m.status_code = status_code
     m.json.return_value = data
+    m.headers = headers or {}
     m.raise_for_status.return_value = None
     return m
 
@@ -67,6 +68,25 @@ def test_pull_session_treats_404_as_empty(tmp_path):
     assert laps.height == 1
 
 
+def test_pull_session_treats_422_as_empty(tmp_path):
+    # Oversized queries (e.g. car_data) return 422 "too much data" — treat as
+    # no data rather than crashing the whole pull.
+    def fake_get(url, **kwargs):
+        if "/intervals" in url:
+            return _status_response(422, {"detail": "too much data at once"})
+        return _status_response(200, [{"session_key": 9161}])
+
+    with patch("f1_predictor.ingest.requests.Session") as MockSession:
+        session_obj = MagicMock()
+        session_obj.get.side_effect = fake_get
+        MockSession.return_value.__enter__ = lambda s: session_obj
+        MockSession.return_value.__exit__ = MagicMock(return_value=False)
+        pull_session(9161, tmp_path)
+
+    intervals = pl.read_parquet(tmp_path / "9161" / "intervals.parquet")
+    assert intervals.height == 0, "422 endpoint should produce an empty parquet"
+
+
 def test_pull_session_retries_on_429(tmp_path):
     # /laps returns 429 twice, then 200. The pull should back off and succeed.
     state = {"laps_429": 0}
@@ -90,6 +110,16 @@ def test_pull_session_retries_on_429(tmp_path):
     assert state["laps_429"] == 2, "should have retried past both 429s"
     laps = pl.read_parquet(tmp_path / "9161" / "laps.parquet")
     assert laps.height == 1
+
+
+def test_retry_wait_honours_retry_after():
+    from f1_predictor.ingest import _retry_wait
+    resp = _status_response(429, {}, headers={"Retry-After": "1"})
+    # Header takes precedence over exponential backoff, even on a late attempt.
+    assert _retry_wait(resp, attempt=5) == 1.0
+    # No header → exponential backoff fallback.
+    resp_nohdr = _status_response(429, {}, headers={})
+    assert _retry_wait(resp_nohdr, attempt=0) == 0.5
 
 
 def test_pull_session_handles_mixed_type_column(tmp_path):

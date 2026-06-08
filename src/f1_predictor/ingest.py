@@ -11,6 +11,11 @@ OPENF1_BASE = "https://api.openf1.org/v1"
 # Pit data is NOT pulled directly. OpenF1 has no /pit data for 2023 (the entire
 # training season) while 2024 does — using /pit would skew train vs val/test.
 # pit_this_lap / stops_completed are derived from /stints in Stage 2 instead.
+#
+# car_data (telemetry) is deferred: a per-session query returns 422 ("too much
+# data"), and it's only needed for max_speed_kmh. When backfilled later it must
+# be pulled per driver_number. Until then max_speed_kmh is null (handled in
+# Stage 2's _add_car_data).
 ENDPOINTS = [
     "sessions",
     "drivers",
@@ -20,11 +25,27 @@ ENDPOINTS = [
     "stints",
     "race_control",
     "session_result",
-    "car_data",
 ]
 
-_BASE_DELAY = 0.3       # seconds between requests (politeness / rate limiting)
-_MAX_RETRIES = 5        # attempts on HTTP 429 before giving up
+_BASE_DELAY = 0.5       # seconds between requests (politeness / rate limiting)
+_MAX_RETRIES = 8        # attempts on HTTP 429 before giving up
+_MAX_BACKOFF = 30.0     # cap on exponential backoff (seconds)
+
+
+def _retry_wait(resp: requests.Response, attempt: int) -> float:
+    """Seconds to wait before retrying a 429. Honour Retry-After if present.
+
+    OpenF1's burst allowance is tiny (~3 rapid requests) but it sets
+    Retry-After: 1 and recovers within ~1s, so honouring the header is the
+    reliable path; exponential backoff is the fallback.
+    """
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except (TypeError, ValueError):
+            pass
+    return min(_BASE_DELAY * (2 ** attempt), _MAX_BACKOFF)
 
 
 def _fetch(s: requests.Session, url: str) -> list[dict]:
@@ -32,14 +53,16 @@ def _fetch(s: requests.Session, url: str) -> list[dict]:
 
     - OpenF1 answers zero-row queries with 404 {"detail": "No results found."},
       so a 404 means "no data" → empty list, not an error.
-    - 429 (rate limited) is retried with exponential backoff.
+    - An oversized query returns 422 ("too much data at once"); treat as empty
+      rather than crashing.
+    - 429 (rate limited) is retried, honouring the Retry-After header.
     """
     for attempt in range(_MAX_RETRIES):
         resp = s.get(url, timeout=30)
-        if resp.status_code == 404:
+        if resp.status_code in (404, 422):
             return []
         if resp.status_code == 429:
-            time.sleep(_BASE_DELAY * (2 ** attempt))
+            time.sleep(_retry_wait(resp, attempt))
             continue
         resp.raise_for_status()
         return resp.json()
