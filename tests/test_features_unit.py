@@ -50,3 +50,43 @@ def test_parse_gap_columns_already_float_is_passthrough():
     })
     out = _parse_gap_columns(df)
     assert out["gap_to_leader"].to_list() == [0.0, 1.5]
+
+
+from f1_predictor.features import _add_active_and_distance
+
+
+def _mini_sessionised() -> pl.DataFrame:
+    """3 drivers, 3 laps. Driver 3 retires on lap 2."""
+    return pl.DataFrame({
+        "session_key": [9000] * 9,
+        "driver_number": [1, 1, 1, 2, 2, 2, 3, 3, 3],
+        "lap_number": [1, 2, 3, 1, 2, 3, 1, 2, 3],
+        "position": [1, 1, 1, 2, 2, 2, 3, 3, 3],
+        "is_retired": [False] * 6 + [True] * 3,
+        "retirement_lap": [None] * 6 + [2, 2, 2],
+        "lap_time": [90.0, 89.0, 88.0, 91.0, 90.5, 90.0, 92.0, 93.0, None],
+    })
+
+
+def test_num_active_drivers_decreases_after_retirement():
+    df = _add_active_and_distance(_mini_sessionised(), circuit_length=5.0)
+    by_lap = (
+        df.group_by("lap_number").agg(pl.col("num_active_drivers").first())
+        .sort("lap_number")
+    )
+    # Driver 3 retired on lap 2, so it is inactive only from lap 3 onward.
+    assert by_lap["num_active_drivers"].to_list() == [3, 3, 2]
+
+
+def test_distance_remaining_km_uses_circuit_length():
+    df = _add_active_and_distance(_mini_sessionised(), circuit_length=5.0)
+    # total_laps = max lap_number = 3. circuit_length = 5.0 km.
+    row = df.filter((pl.col("driver_number") == 1) & (pl.col("lap_number") == 1))
+    assert row["distance_remaining_km"][0] == pytest.approx(5.0 * (3 - 1))
+    last = df.filter((pl.col("driver_number") == 1) & (pl.col("lap_number") == 3))
+    assert last["distance_remaining_km"][0] == pytest.approx(0.0)
+
+
+def test_distance_remaining_km_null_when_circuit_unknown():
+    df = _add_active_and_distance(_mini_sessionised(), circuit_length=None)
+    assert df["distance_remaining_km"].null_count() == df.height
