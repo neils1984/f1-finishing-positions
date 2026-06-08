@@ -172,6 +172,37 @@ def _add_gaps_ahead(df: pl.DataFrame) -> pl.DataFrame:
     return df.join(feat, on=["lap_number", "driver_number"], how="left")
 
 
+_TYRE_ONEHOT = {
+    "SOFT": "tyre_soft",
+    "MEDIUM": "tyre_medium",
+    "HARD": "tyre_hard",
+    "INTER": "tyre_inter",
+    "WET": "tyre_wet",
+}
+
+
+def _add_tyre_onehot(df: pl.DataFrame) -> pl.DataFrame:
+    """Five binary tyre columns. Null/unknown compound -> all zeros."""
+    return df.with_columns([
+        (pl.col("tyre_compound") == compound).fill_null(False).cast(pl.Int8).alias(col)
+        for compound, col in _TYRE_ONEHOT.items()
+    ])
+
+
+def _add_stops_vs_median(df: pl.DataFrame) -> pl.DataFrame:
+    """stops_completed minus the per-lap median stops across the field."""
+    med = df.group_by("lap_number").agg(
+        pl.col("stops_completed").median().alias("_med_stops")
+    )
+    return (
+        df.join(med, on="lap_number", how="left")
+        .with_columns(
+            (pl.col("stops_completed").cast(pl.Float64) - pl.col("_med_stops")).alias("stops_vs_median")
+        )
+        .drop("_med_stops")
+    )
+
+
 def _add_rolling_pace(df: pl.DataFrame) -> pl.DataFrame:
     """Add rolling_lap_time_3_norm and rolling_lap_time_3_delta_leader.
 

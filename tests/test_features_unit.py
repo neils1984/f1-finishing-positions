@@ -180,3 +180,29 @@ def test_gaps_ahead_mean_and_stdev():
     assert m[2] == pytest.approx(1.0) and s[2] == pytest.approx(0.0)
     # P4: inter-car gaps among {P1,P2,P3} = [1,2] -> mean 1.5, stdev 0.5 (population)
     assert m[3] == pytest.approx(1.5) and s[3] == pytest.approx(0.5)
+
+
+from f1_predictor.features import _add_tyre_onehot, _add_stops_vs_median
+
+
+def test_tyre_onehot_columns():
+    df = pl.DataFrame({"tyre_compound": ["SOFT", "MEDIUM", "HARD", "INTER", "WET", None]})
+    out = _add_tyre_onehot(df)
+    for c in ["tyre_soft", "tyre_medium", "tyre_hard", "tyre_inter", "tyre_wet"]:
+        assert c in out.columns
+        assert out[c].dtype == pl.Int8
+    assert out["tyre_soft"].to_list() == [1, 0, 0, 0, 0, 0]
+    assert out["tyre_wet"].to_list() == [0, 0, 0, 0, 1, 0]
+    # Unknown/null compound -> all zeros
+    assert out.row(5, named=True)["tyre_hard"] == 0
+
+
+def test_stops_vs_median():
+    # One lap, three drivers with stops 0, 1, 2 -> median 1.
+    df = pl.DataFrame({
+        "lap_number": [5, 5, 5],
+        "driver_number": [1, 2, 3],
+        "stops_completed": [0, 1, 2],
+    })
+    out = _add_stops_vs_median(df).sort("driver_number")
+    assert out["stops_vs_median"].to_list() == [-1.0, 0.0, 1.0]
