@@ -1,10 +1,12 @@
 """Unit tests for Stage 4 (snapshots) and the run_pipeline helper."""
+import json
 import numpy as np
 import polars as pl
 import pytest
 
 from f1_predictor.snapshots import assign_split, extract_snapshots, RELEVANCE_BASE
 from f1_predictor.snapshots import fit_scaler, apply_scaler
+from f1_predictor.snapshots import build_snapshots
 
 
 def _mini_features() -> pl.DataFrame:
@@ -84,6 +86,47 @@ def test_apply_scaler_imputes_nulls_before_scaling():
     out = apply_scaler(pl.DataFrame({"a": [None]}), params, ["a"])
     # null -> 0 -> (0-2)/std
     assert out["a"][0] == pytest.approx((0.0 - 2.0) / np.std([0.0, 2.0, 4.0]))
+
+
+def _write_feature_file(features_dir, raw_dir, key, date, n_laps=4):
+    features_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / str(key)).mkdir(parents=True, exist_ok=True)
+    # minimal sessions.parquet for the date
+    pl.DataFrame({"date_start": [date], "circuit_short_name": ["X"]}).write_parquet(
+        raw_dir / str(key) / "sessions.parquet"
+    )
+    rows = []
+    for d in (1, 2):
+        for lap in range(1, n_laps + 1):
+            rows.append({"session_key": key, "driver_number": d, "lap_number": lap,
+                         "final_position": d, "position": d, "gap_to_leader": float(d)})
+    pl.DataFrame(rows).write_parquet(features_dir / f"{key}.parquet")
+
+
+def test_build_snapshots_writes_splits_and_metadata(tmp_path):
+    features_dir = tmp_path / "features"
+    raw_dir = tmp_path / "raw"
+    out_dir = tmp_path / "snapshots"
+    _write_feature_file(features_dir, raw_dir, 700, "2023-05-01T13:00:00+00:00")  # train
+    _write_feature_file(features_dir, raw_dir, 800, "2024-03-01T13:00:00+00:00")  # val
+    _write_feature_file(features_dir, raw_dir, 900, "2024-09-01T13:00:00+00:00")  # test
+
+    build_snapshots(
+        features_dir=features_dir, raw_dir=raw_dir, out_dir=out_dir,
+        feature_columns=["position", "gap_to_leader"],
+        snapshot_laps=[2, 4], val_cutoff="2024-07-01", git_sha="deadbeef",
+    )
+
+    for split in ("train", "val", "test"):
+        assert (out_dir / f"{split}.parquet").exists()
+    meta = json.loads((out_dir / "metadata.json").read_text())
+    assert meta["feature_columns"] == ["position", "gap_to_leader"]
+    assert meta["splits"]["train"] == [700]
+    assert meta["splits"]["test"] == [900]
+    assert "data_version" in meta
+    # Train 'position' is standardised -> mean ~0
+    train = pl.read_parquet(out_dir / "train.parquet")
+    assert abs(train["position"].mean()) < 1e-9
 
 
 def test_run_pipeline_lists_session_keys(tmp_path):
