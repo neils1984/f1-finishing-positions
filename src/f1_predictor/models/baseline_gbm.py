@@ -95,7 +95,9 @@ def run_baseline(
     train = pl.read_parquet(snapshots_dir / "train.parquet")
     test = pl.read_parquet(snapshots_dir / "test.parquet")
     val_path = snapshots_dir / "val.parquet"
-    valid = pl.read_parquet(val_path) if val_path.exists() and pl.read_parquet(val_path).height else None
+    valid = pl.read_parquet(val_path) if val_path.exists() else None
+    if valid is not None and valid.is_empty():
+        valid = None
 
     model = train_baseline(train, feature_columns, params=params, valid=valid)
 
@@ -111,7 +113,7 @@ def run_baseline(
     model.save_model(str(run_dir / "model.lgb"))
     preds.write_parquet(run_dir / "predictions_test.parquet")
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    (run_dir / "config.yaml").write_text(json.dumps({
+    (run_dir / "config.json").write_text(json.dumps({
         "model": "lightgbm_lambdarank",
         "params": {**_DEFAULT_PARAMS, **(params or {})},
         "feature_columns": feature_columns,

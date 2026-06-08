@@ -122,6 +122,12 @@ def build_snapshots(
         split = assign_split(_race_date(raw_dir, key), val_cutoff)
         feats = pl.read_parquet(features_dir / f"{key}.parquet")
         snaps = extract_snapshots(feats, snapshot_laps, feature_columns)
+        # Guard: each driver must appear at most once per (race, snapshot_lap).
+        # A duplicate here means corrupted upstream data and would silently
+        # distort a LightGBM ranking group — fail loudly instead.
+        dup = snaps.select(["session_key", "snapshot_lap", "driver_number"]).is_duplicated().sum()
+        if dup:
+            raise ValueError(f"Session {key}: {dup} duplicate driver-lap snapshot rows")
         snaps = snaps.with_columns(pl.lit(split).alias("split"))
         split_keys[split].append(key)
         raw_by_split[split].append(snaps)
