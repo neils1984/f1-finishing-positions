@@ -379,9 +379,16 @@ def _build_masks(lap_table: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
 
 
 def sessionise(session_key: int, raw_dir: Path, sessions_dir: Path) -> pl.DataFrame:
-    """Run all Stage 2 joins for one race. Save result and masks; return DataFrame."""
+    """Run all Stage 2 joins for one race. Save result and masks; return DataFrame.
+
+    A session with no lap data (e.g. a cancelled race such as 2023 Imola) is
+    skipped: returns an empty DataFrame and writes no artefacts.
+    """
     session_dir = raw_dir / str(session_key)
     raw = _read_raw(session_dir)
+
+    if raw["laps"].is_empty():
+        return pl.DataFrame()
 
     df = _build_lap_table(raw["laps"])
     df = _join_positions(df, raw["position"])

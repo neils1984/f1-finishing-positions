@@ -356,7 +356,22 @@ def test_vsc_and_red_flag_active():
     assert result["red_flag_active"].to_list() == [False, False, False, False, True]
 
 
-from f1_predictor.sessionise import _add_retirements
+from f1_predictor.sessionise import _add_retirements, sessionise
+
+
+def test_sessionise_skips_session_with_no_laps(tmp_path):
+    # A cancelled race (e.g. 2023 Imola) has an empty laps endpoint. sessionise
+    # must skip it: return an empty frame and write no artefacts, not crash.
+    session_dir = tmp_path / "raw" / "9086"
+    session_dir.mkdir(parents=True)
+    pl.DataFrame().write_parquet(session_dir / "laps.parquet")
+
+    out = tmp_path / "sessions"
+    result = sessionise(9086, tmp_path / "raw", out)
+
+    assert result.is_empty()
+    assert not (out / "9086.parquet").exists()
+    assert not (out / "9086_masks.npz").exists()
 
 
 def _session_result(rows: list[dict]) -> pl.DataFrame:
