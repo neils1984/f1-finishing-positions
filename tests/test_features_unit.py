@@ -161,6 +161,21 @@ def test_pace_deltas_to_ahead_and_behind():
     assert p3["last_lap_pace_delta_to_behind"][0] is None
 
 
+def test_pace_deltas_no_fanout_on_duplicate_position():
+    # Stage 2's position asof-join can tie two drivers at the same position on a
+    # lap. _add_pace_deltas must not duplicate rows when that happens.
+    df = pl.DataFrame({
+        "driver_number": [1, 2, 3, 4],
+        "lap_number": [5, 5, 5, 5],
+        "position": [1, 2, 3, 3],  # drivers 3 and 4 share position 3
+        "lap_time": [88.0, 89.0, 90.0, 90.5],
+    })
+    out = _add_pace_deltas(df)
+    assert out.height == 4, "must not fan out rows when a position is shared"
+    assert "last_lap_pace_delta_to_ahead" in out.columns
+    assert "last_lap_pace_delta_to_behind" in out.columns
+
+
 def test_gaps_ahead_mean_and_stdev():
     # Positions 1..4 with cumulative gap_to_leader 0, 1, 3, 6 -> inter-car gaps 1,2,3.
     df = pl.DataFrame({

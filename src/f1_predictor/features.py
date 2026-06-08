@@ -114,8 +114,19 @@ def _add_positions_gained(df: pl.DataFrame, grid: dict[int, int]) -> pl.DataFram
 
 
 def _add_pace_deltas(df: pl.DataFrame) -> pl.DataFrame:
-    """last_lap_pace_delta_to_ahead/behind: lap_time minus the P-1 / P+1 car's lap_time."""
-    pace = df.select(["lap_number", "position", "lap_time"])
+    """last_lap_pace_delta_to_ahead/behind: lap_time minus the P-1 / P+1 car's lap_time.
+
+    Stage 2's position asof-join can momentarily tie two drivers at the same
+    position on a lap. The position lookup is deduplicated to one lap_time per
+    (lap_number, position) — lowest driver_number wins, deterministically — so
+    the self-join cannot fan out rows.
+    """
+    pace = (
+        df.select(["lap_number", "position", "driver_number", "lap_time"])
+        .sort(["lap_number", "position", "driver_number"])
+        .unique(subset=["lap_number", "position"], keep="first", maintain_order=True)
+        .select(["lap_number", "position", "lap_time"])
+    )
     ahead = pace.rename({"position": "_pos_join", "lap_time": "_lt_ahead"})
     behind = pace.rename({"position": "_pos_join", "lap_time": "_lt_behind"})
 
