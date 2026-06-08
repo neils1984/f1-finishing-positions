@@ -13,6 +13,10 @@ import polars as pl
 # The validation season; anything earlier is train.
 _VAL_YEAR = 2024
 
+RELEVANCE_BASE = 21  # relevance = RELEVANCE_BASE - final_position (higher = better)
+
+_META_COLUMNS = ["session_key", "snapshot_lap", "driver_number", "final_position", "relevance"]
+
 
 def assign_split(date_start: str, val_cutoff: str) -> str:
     """Classify a race into 'train' | 'val' | 'test' by its start date.
@@ -26,3 +30,24 @@ def assign_split(date_start: str, val_cutoff: str) -> str:
     if dt.year < _VAL_YEAR:
         return "train"
     return "val" if dt.date() < cutoff else "test"
+
+
+def extract_snapshots(
+    features: pl.DataFrame,
+    snapshot_laps: list[int],
+    feature_columns: list[str],
+) -> pl.DataFrame:
+    """One row per (snapshot_lap, active driver) with relevance + feature columns.
+
+    A driver is "active" at a snapshot lap if it has a feature row at that exact
+    lap_number. relevance = RELEVANCE_BASE - final_position.
+    """
+    snaps = (
+        features.filter(pl.col("lap_number").is_in(snapshot_laps))
+        .with_columns([
+            pl.col("lap_number").alias("snapshot_lap"),
+            (RELEVANCE_BASE - pl.col("final_position")).alias("relevance"),
+        ])
+        .select(_META_COLUMNS + feature_columns)
+    )
+    return snaps
