@@ -183,6 +183,32 @@ def test_gaps_ahead_mean_and_stdev():
 
 
 from f1_predictor.features import _add_tyre_onehot, _add_stops_vs_median
+from f1_predictor.features import _grid_from_position, FEATURE_COLUMNS
+
+
+def test_grid_from_position_takes_earliest_reading():
+    # Driver 1's earliest reading is grid P3; later readings are mid-race.
+    pos = pl.DataFrame({
+        "driver_number": [1, 1, 1, 2, 2],
+        "date": [
+            "2023-03-05T14:01:00+00:00",  # grid
+            "2023-03-05T15:03:45+00:00",  # race
+            "2023-03-05T15:10:00+00:00",  # race
+            "2023-03-05T14:01:00+00:00",  # grid
+            "2023-03-05T15:03:45+00:00",  # race
+        ],
+        "position": [3, 1, 1, 1, 2],
+    })
+    grid = _grid_from_position(pos)
+    assert grid == {1: 3, 2: 1}
+
+
+def test_feature_columns_constant_complete():
+    # The public column contract must list exactly the 24 features + tyre one-hots.
+    for c in ["position", "positions_gained_from_grid", "distance_remaining_km",
+              "tyre_soft", "tyre_wet", "stops_vs_median",
+              "driver_championship_standing", "team_circuit_finish_rate"]:
+        assert c in FEATURE_COLUMNS
 
 
 def test_tyre_onehot_columns():

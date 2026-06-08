@@ -11,6 +11,24 @@ import numpy as np
 import polars as pl
 import yaml
 
+from f1_predictor.priors import compute_priors, build_driver_races
+
+FEATURE_COLUMNS = [
+    "position", "positions_gained_from_grid", "num_active_drivers",
+    "distance_remaining_km", "gap_to_leader", "interval_to_ahead",
+    "rolling_lap_time_3_norm", "rolling_lap_time_3_delta_leader",
+    "last_lap_pace_delta_to_ahead", "last_lap_pace_delta_to_behind",
+    "mean_gap_cars_ahead", "stdev_gap_cars_ahead", "max_speed_kmh",
+    "tyre_soft", "tyre_medium", "tyre_hard", "tyre_inter", "tyre_wet",
+    "tyre_age_laps", "stint_number", "stops_vs_median",
+    "sc_active", "vsc_active", "red_flag_active", "laps_since_sc_end",
+    "is_street_circuit",
+    "driver_circuit_finish_rate", "driver_championship_standing",
+    "team_circuit_finish_rate", "team_championship_standing",
+]
+
+_KEY_COLUMNS = ["session_key", "driver_number", "lap_number", "final_position"]
+
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
 
@@ -233,3 +251,55 @@ def _add_rolling_pace(df: pl.DataFrame) -> pl.DataFrame:
         ])
         .drop(["_roll3", "_field_med", "_leader_roll3"])
     )
+
+
+def _grid_from_position(pos_df: pl.DataFrame) -> dict[int, int]:
+    """Grid position per driver = position at the earliest reading (pre-race)."""
+    earliest = (
+        pos_df.sort("date")
+        .group_by("driver_number", maintain_order=True)
+        .agg(pl.col("position").first().alias("grid"))
+    )
+    return dict(zip(earliest["driver_number"].to_list(), earliest["grid"].to_list()))
+
+
+def build_features(
+    session_key: int,
+    sessions_dir: Path,
+    raw_dir: Path,
+    features_dir: Path,
+    priors: pl.DataFrame,
+    circuits: dict | None = None,
+) -> pl.DataFrame:
+    """Engineer all Stage 3 features for one race and write the parquet.
+
+    `priors` is the cross-race prior table from compute_priors() (one row per
+    (session_key, driver_number)); it is computed once for all races by the CLI.
+    Returns the feature DataFrame.
+    """
+    circuits = circuits or load_circuits()
+    df = pl.read_parquet(sessions_dir / f"{session_key}.parquet")
+
+    ses = pl.read_parquet(raw_dir / str(session_key) / "sessions.parquet").row(0, named=True)
+    circuit = ses["circuit_short_name"]
+    pos_raw = pl.read_parquet(raw_dir / str(session_key) / "position.parquet")
+    grid = _grid_from_position(pos_raw)
+
+    df = _parse_gap_columns(df)
+    df = _add_active_and_distance(df, circuit_length_km(circuit, circuits))
+    df = _add_positions_gained(df, grid)
+    df = _add_pace_deltas(df)
+    df = _add_gaps_ahead(df)
+    df = _add_rolling_pace(df)
+    df = _add_tyre_onehot(df)
+    df = _add_stops_vs_median(df)
+    df = df.with_columns(pl.lit(is_street_circuit(circuit, circuits)).alias("is_street_circuit"))
+
+    race_priors = priors.filter(pl.col("session_key") == session_key).drop("session_key")
+    df = df.join(race_priors, on="driver_number", how="left")
+
+    out = df.select(_KEY_COLUMNS + FEATURE_COLUMNS)
+
+    features_dir.mkdir(parents=True, exist_ok=True)
+    out.write_parquet(features_dir / f"{session_key}.parquet")
+    return out
