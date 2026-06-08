@@ -170,3 +170,35 @@ def _add_gaps_ahead(df: pl.DataFrame) -> pl.DataFrame:
         "driver_number": df.schema["driver_number"],
     })
     return df.join(feat, on=["lap_number", "driver_number"], how="left")
+
+
+def _add_rolling_pace(df: pl.DataFrame) -> pl.DataFrame:
+    """Add rolling_lap_time_3_norm and rolling_lap_time_3_delta_leader.
+
+    rolling3 = mean lap_time over the last 3 laps per driver (min_periods=1).
+    _norm divides by the field median of rolling3 at that lap; _delta_leader
+    subtracts the rolling3 of the car in position 1 at that lap. Pit/SC laps are
+    included as-is (they inflate rolling3); this is acceptable for v1.
+    """
+    df = df.sort(["driver_number", "lap_number"]).with_columns(
+        pl.col("lap_time").rolling_mean(window_size=3, min_samples=1).over("driver_number").alias("_roll3")
+    )
+
+    field = (
+        df.group_by("lap_number").agg(pl.col("_roll3").median().alias("_field_med"))
+    )
+    leader = (
+        df.filter(pl.col("position") == 1)
+        .select(["lap_number", pl.col("_roll3").alias("_leader_roll3")])
+        .unique("lap_number")
+    )
+
+    return (
+        df.join(field, on="lap_number", how="left")
+        .join(leader, on="lap_number", how="left")
+        .with_columns([
+            (pl.col("_roll3") / pl.col("_field_med")).alias("rolling_lap_time_3_norm"),
+            (pl.col("_roll3") - pl.col("_leader_roll3")).alias("rolling_lap_time_3_delta_leader"),
+        ])
+        .drop(["_roll3", "_field_med", "_leader_roll3"])
+    )

@@ -94,6 +94,39 @@ def test_distance_remaining_km_null_when_circuit_unknown():
 
 import math
 from f1_predictor.features import _add_positions_gained, _add_pace_deltas, _add_gaps_ahead
+from f1_predictor.features import _add_rolling_pace
+
+
+def test_rolling_lap_time_3_norm_and_delta_leader():
+    # Two drivers, 3 laps. Driver 1 is the leader (position 1) every lap.
+    df = pl.DataFrame({
+        "driver_number": [1, 1, 1, 2, 2, 2],
+        "lap_number": [1, 2, 3, 1, 2, 3],
+        "position": [1, 1, 1, 2, 2, 2],
+        "lap_time": [90.0, 90.0, 90.0, 100.0, 100.0, 100.0],
+    })
+    out = _add_rolling_pace(df).sort(["driver_number", "lap_number"])
+    # Lap 3: rolling3 driver1 = 90, driver2 = 100. field median of {90,100} = 95.
+    d1_l3 = out.filter((pl.col("driver_number") == 1) & (pl.col("lap_number") == 3))
+    d2_l3 = out.filter((pl.col("driver_number") == 2) & (pl.col("lap_number") == 3))
+    assert d1_l3["rolling_lap_time_3_norm"][0] == pytest.approx(90.0 / 95.0)
+    assert d2_l3["rolling_lap_time_3_norm"][0] == pytest.approx(100.0 / 95.0)
+    # delta_leader = driver rolling - leader (position 1) rolling
+    assert d1_l3["rolling_lap_time_3_delta_leader"][0] == pytest.approx(0.0)
+    assert d2_l3["rolling_lap_time_3_delta_leader"][0] == pytest.approx(10.0)
+
+
+def test_rolling_pace_partial_window_uses_available_laps():
+    # On lap 1 the rolling mean is just that lap's time (min_periods=1).
+    df = pl.DataFrame({
+        "driver_number": [1, 2],
+        "lap_number": [1, 1],
+        "position": [1, 2],
+        "lap_time": [90.0, 94.0],
+    })
+    out = _add_rolling_pace(df)
+    d1 = out.filter(pl.col("driver_number") == 1)
+    assert d1["rolling_lap_time_3_delta_leader"][0] == pytest.approx(0.0)
 
 
 def test_positions_gained_from_grid_sign():
