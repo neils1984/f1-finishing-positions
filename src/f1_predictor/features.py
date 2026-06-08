@@ -11,8 +11,6 @@ import numpy as np
 import polars as pl
 import yaml
 
-from f1_predictor.priors import compute_priors, build_driver_races
-
 FEATURE_COLUMNS = [
     "position", "positions_gained_from_grid", "num_active_drivers",
     "distance_remaining_km", "gap_to_leader", "interval_to_ahead",
@@ -179,7 +177,14 @@ def _add_gaps_ahead(df: pl.DataFrame) -> pl.DataFrame:
     keys: list[tuple] = []
 
     for (lap,), grp in df.group_by(["lap_number"], maintain_order=True):
-        valid = grp.filter(pl.col("position").is_not_null() & pl.col("gap_to_leader").is_not_null())
+        # Dedupe to one row per position (lowest driver_number) so a Stage 2
+        # asof-join tie at a position doesn't inject a spurious ~0 inter-car gap
+        # into the cars behind. Tied drivers then share the same position's value.
+        valid = (
+            grp.filter(pl.col("position").is_not_null() & pl.col("gap_to_leader").is_not_null())
+            .sort("driver_number")
+            .unique(subset=["position"], keep="first", maintain_order=True)
+        )
         lookup = _gaps_ahead_for_lap(
             valid["position"].to_list(), valid["gap_to_leader"].to_list()
         )
@@ -249,8 +254,9 @@ def _add_rolling_pace(df: pl.DataFrame) -> pl.DataFrame:
     )
     leader = (
         df.filter(pl.col("position") == 1)
+        .sort(["lap_number", "driver_number"])
+        .unique(subset=["lap_number"], keep="first", maintain_order=True)
         .select(["lap_number", pl.col("_roll3").alias("_leader_roll3")])
-        .unique("lap_number")
     )
 
     return (

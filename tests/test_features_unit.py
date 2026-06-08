@@ -197,6 +197,45 @@ def test_gaps_ahead_mean_and_stdev():
     assert m[3] == pytest.approx(1.5) and s[3] == pytest.approx(0.5)
 
 
+def test_gaps_ahead_ignores_tied_positions():
+    # Two drivers tie at position 2 (a Stage 2 asof-join artifact). The tie must
+    # not inject a spurious ~0 inter-car gap for the car behind, and both tied
+    # drivers get the same (deduped) value.
+    df = pl.DataFrame({
+        "driver_number": [1, 2, 3, 4],
+        "lap_number": [5, 5, 5, 5],
+        "position": [1, 2, 2, 3],          # drivers 2 and 3 both at P2
+        "gap_to_leader": [0.0, 1.0, 1.0, 3.0],
+    })
+    out = _add_gaps_ahead(df).sort("driver_number")
+    g = {r["driver_number"]: (r["mean_gap_cars_ahead"], r["stdev_gap_cars_ahead"])
+         for r in out.iter_rows(named=True)}
+    # Deduped positions {P1:0, P2:1, P3:3}; for P3 the only inter-car gap among
+    # cars ahead is (1-0)=1 -> mean 1, stdev 0 (NOT contaminated by a 0 from the tie).
+    assert g[4][0] == pytest.approx(1.0)
+    assert g[4][1] == pytest.approx(0.0)
+    # Both tied P2 drivers get P2's value (no cars-ahead gap pair) -> 0, 0.
+    assert g[2] == g[3]
+
+
+def test_rolling_pace_leader_tie_is_deterministic():
+    # Two drivers tie at position 1 on a lap. The leader rolling time used for
+    # delta must be chosen deterministically (lowest driver_number) and stable.
+    df = pl.DataFrame({
+        "driver_number": [2, 5, 9],
+        "lap_number": [1, 1, 1],
+        "position": [1, 1, 2],             # drivers 2 and 5 tie at P1
+        "lap_time": [90.0, 92.0, 95.0],
+    })
+    out1 = _add_rolling_pace(df)
+    out2 = _add_rolling_pace(df)
+    d9_a = out1.filter(pl.col("driver_number") == 9)["rolling_lap_time_3_delta_leader"][0]
+    d9_b = out2.filter(pl.col("driver_number") == 9)["rolling_lap_time_3_delta_leader"][0]
+    assert d9_a == d9_b                       # deterministic across runs
+    # Leader = lowest driver_number among P1 ties = driver 2 (rolling 90).
+    assert d9_a == pytest.approx(95.0 - 90.0)
+
+
 from f1_predictor.features import _add_tyre_onehot, _add_stops_vs_median
 from f1_predictor.features import _grid_from_position, FEATURE_COLUMNS
 
