@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import numpy as np
 import polars as pl
+from sklearn.preprocessing import StandardScaler
 
 # The validation season; anything earlier is train.
 _VAL_YEAR = 2024
@@ -51,3 +53,35 @@ def extract_snapshots(
         .select(_META_COLUMNS + feature_columns)
     )
     return snaps
+
+
+def _impute(df: pl.DataFrame, feature_columns: list[str]) -> pl.DataFrame:
+    """Bool->Int, then fill nulls with 0.0 and cast features to Float64."""
+    return df.with_columns([
+        pl.col(c).cast(pl.Float64, strict=False).fill_null(0.0).alias(c)
+        for c in feature_columns
+    ])
+
+
+def fit_scaler(train: pl.DataFrame, feature_columns: list[str]) -> dict:
+    """Fit a StandardScaler on imputed train features; return params as dicts.
+
+    Zero-variance columns get scale 1.0 (sklearn behaviour), so all-null-in-train
+    features map to 0 in train and pass real values through unchanged elsewhere.
+    """
+    x = _impute(train, feature_columns).select(feature_columns).to_numpy()
+    scaler = StandardScaler().fit(x)
+    scale = np.where(scaler.scale_ == 0.0, 1.0, scaler.scale_)
+    return {
+        "mean": {c: float(m) for c, m in zip(feature_columns, scaler.mean_)},
+        "scale": {c: float(s) for c, s in zip(feature_columns, scale)},
+    }
+
+
+def apply_scaler(df: pl.DataFrame, params: dict, feature_columns: list[str]) -> pl.DataFrame:
+    """Impute nulls to 0.0 then standardise each feature with the fitted params."""
+    df = _impute(df, feature_columns)
+    return df.with_columns([
+        ((pl.col(c) - params["mean"][c]) / params["scale"][c]).alias(c)
+        for c in feature_columns
+    ])

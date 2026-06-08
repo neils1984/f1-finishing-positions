@@ -1,8 +1,10 @@
 """Unit tests for Stage 4 (snapshots) and the run_pipeline helper."""
+import numpy as np
 import polars as pl
 import pytest
 
 from f1_predictor.snapshots import assign_split, extract_snapshots, RELEVANCE_BASE
+from f1_predictor.snapshots import fit_scaler, apply_scaler
 
 
 def _mini_features() -> pl.DataFrame:
@@ -55,6 +57,33 @@ def test_assign_split_2024_on_or_after_cutoff_is_test():
 def test_assign_split_pre_2023_is_train():
     # Any race earlier than the val season counts as train.
     assert assign_split("2022-11-20T13:00:00+00:00", "2024-07-01") == "train"
+
+
+def test_fit_scaler_uses_train_only_and_imputes_nulls():
+    train = pl.DataFrame({"a": [0.0, 2.0, 4.0], "b": [None, None, None]})
+    params = fit_scaler(train, feature_columns=["a", "b"])
+    # mean(a)=2, std(a)=sqrt(8/3); b is all-null -> imputed 0 -> mean 0, scale 1.
+    assert params["mean"]["a"] == pytest.approx(2.0)
+    assert params["scale"]["a"] == pytest.approx(np.std([0.0, 2.0, 4.0]))
+    assert params["mean"]["b"] == pytest.approx(0.0)
+    assert params["scale"]["b"] == pytest.approx(1.0)  # zero-variance -> scale 1
+
+
+def test_apply_scaler_standardises_and_passes_through_constant():
+    train = pl.DataFrame({"a": [0.0, 2.0, 4.0], "b": [None, None, None]})
+    params = fit_scaler(train, ["a", "b"])
+    out = apply_scaler(pl.DataFrame({"a": [2.0], "b": [5.0]}), params, ["a", "b"])
+    assert out["a"][0] == pytest.approx(0.0)       # (2-2)/std = 0
+    # b had scale 1, mean 0 -> passes 5.0 through unchanged (the 2024 skew case)
+    assert out["b"][0] == pytest.approx(5.0)
+
+
+def test_apply_scaler_imputes_nulls_before_scaling():
+    train = pl.DataFrame({"a": [0.0, 2.0, 4.0]})
+    params = fit_scaler(train, ["a"])
+    out = apply_scaler(pl.DataFrame({"a": [None]}), params, ["a"])
+    # null -> 0 -> (0-2)/std
+    assert out["a"][0] == pytest.approx((0.0 - 2.0) / np.std([0.0, 2.0, 4.0]))
 
 
 def test_run_pipeline_lists_session_keys(tmp_path):
