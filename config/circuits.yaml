@@ -1,0 +1,33 @@
+# OpenF1 circuit_short_name -> length in km (FIA). Used for distance_remaining_km.
+lengths_km:
+  Sakhir: 5.412
+  Jeddah: 6.174
+  Melbourne: 5.278
+  Baku: 6.003
+  Miami: 5.412
+  Imola: 4.909
+  Monte Carlo: 3.337
+  Catalunya: 4.657
+  Montreal: 4.361
+  Spielberg: 4.318
+  Silverstone: 5.891
+  Hungaroring: 4.381
+  Spa-Francorchamps: 7.004
+  Zandvoort: 4.259
+  Monza: 5.793
+  Singapore: 4.940
+  Suzuka: 5.807
+  Lusail: 5.419
+  Austin: 5.513
+  Mexico City: 4.304
+  Interlagos: 4.309
+  Las Vegas: 6.201
+  Yas Marina Circuit: 5.281
+  Shanghai: 5.451
+
+# Street circuits (is_street_circuit = True). Monaco is excluded from training.
+street:
+  - Baku
+  - Singapore
+  - Las Vegas
+  - Miami
