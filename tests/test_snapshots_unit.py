@@ -2,6 +2,26 @@
 import polars as pl
 import pytest
 
+from f1_predictor.snapshots import assign_split
+
+
+def test_assign_split_2023_is_train():
+    assert assign_split("2023-03-05T15:00:00+00:00", "2024-07-01") == "train"
+
+
+def test_assign_split_2024_before_cutoff_is_val():
+    assert assign_split("2024-03-02T15:00:00+00:00", "2024-07-01") == "val"
+
+
+def test_assign_split_2024_on_or_after_cutoff_is_test():
+    assert assign_split("2024-07-07T13:00:00+00:00", "2024-07-01") == "test"
+    assert assign_split("2024-07-01T00:00:00+00:00", "2024-07-01") == "test"
+
+
+def test_assign_split_pre_2023_is_train():
+    # Any race earlier than the val season counts as train.
+    assert assign_split("2022-11-20T13:00:00+00:00", "2024-07-01") == "train"
+
 
 def test_run_pipeline_lists_session_keys(tmp_path):
     # run_pipeline.discover_sessions returns the integer keys of raw sessions
