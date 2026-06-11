@@ -53,6 +53,11 @@ def test_pull_session_treats_404_as_empty(tmp_path):
     def fake_get(url, **kwargs):
         if "/stints" in url:
             return _status_response(404, {"detail": "No results found."})
+        if "/drivers" in url:
+            return _status_response(200, [{"session_key": 9161, "driver_number": 1}])
+        if "/car_data" in url:
+            dn = int(url.split("driver_number=")[1])
+            return _status_response(200, [{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 300}])
         return _status_response(200, [{"session_key": 9161}])
 
     with patch("f1_predictor.ingest.requests.Session") as MockSession:
@@ -74,6 +79,11 @@ def test_pull_session_treats_422_as_empty(tmp_path):
     def fake_get(url, **kwargs):
         if "/intervals" in url:
             return _status_response(422, {"detail": "too much data at once"})
+        if "/drivers" in url:
+            return _status_response(200, [{"session_key": 9161, "driver_number": 1}])
+        if "/car_data" in url:
+            dn = int(url.split("driver_number=")[1])
+            return _status_response(200, [{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 300}])
         return _status_response(200, [{"session_key": 9161}])
 
     with patch("f1_predictor.ingest.requests.Session") as MockSession:
@@ -95,6 +105,11 @@ def test_pull_session_retries_on_429(tmp_path):
         if "/laps" in url and state["laps_429"] < 2:
             state["laps_429"] += 1
             return _status_response(429, {"detail": "rate limited"})
+        if "/drivers" in url:
+            return _status_response(200, [{"session_key": 9161, "driver_number": 1}])
+        if "/car_data" in url:
+            dn = int(url.split("driver_number=")[1])
+            return _status_response(200, [{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 300}])
         return _status_response(200, [{"session_key": 9161}])
 
     with (
@@ -132,6 +147,11 @@ def test_pull_session_handles_mixed_type_column(tmp_path):
     def fake_get(url, **kwargs):
         if "/intervals" in url:
             return make_mock_response(mixed_rows)
+        if "/drivers" in url:
+            return make_mock_response([{"session_key": 9161, "driver_number": 1}])
+        if "/car_data" in url:
+            dn = int(url.split("driver_number=")[1])
+            return make_mock_response([{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 300}])
         return make_mock_response([{"session_key": 9161}])
 
     with patch("f1_predictor.ingest.requests.Session") as MockSession:
@@ -161,9 +181,17 @@ def test_pull_session_force_repulls(tmp_path):
     session_dir.mkdir()
     (session_dir / "meta.json").write_text('{"session_key": 9161, "pull_timestamp": "2026-01-01"}')
 
+    def fake_get(url, **kwargs):
+        if "/drivers" in url:
+            return make_mock_response([{"session_key": 9161, "driver_number": 1}])
+        if "/car_data" in url:
+            dn = int(url.split("driver_number=")[1])
+            return make_mock_response([{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 300}])
+        return make_mock_response([{"session_key": 9161}])
+
     with patch("f1_predictor.ingest.requests.Session") as MockSession:
         session_obj = MagicMock()
-        session_obj.get.return_value = make_mock_response([{"session_key": 9161}])
+        session_obj.get.side_effect = fake_get
         MockSession.return_value.__enter__ = lambda s: session_obj
         MockSession.return_value.__exit__ = MagicMock(return_value=False)
         pull_session(9161, tmp_path, force=True)
@@ -246,3 +274,32 @@ def test_pull_season_returns_session_keys(tmp_path):
         keys = pull_season(2023, tmp_path)
 
     assert keys == [9001, 9003]
+
+
+def test_pull_car_data_concatenates_per_driver(tmp_path, monkeypatch):
+    from f1_predictor import ingest
+
+    calls = []
+
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            dn = int(calls[-1].split("driver_number=")[1])
+            return [{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 250 + dn}]
+        def raise_for_status(self): pass
+
+    class FakeSession:
+        def get(self, url, timeout=30):
+            calls.append(url); return FakeResp()
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    monkeypatch.setattr(ingest.requests, "Session", lambda: FakeSession())
+
+    out = tmp_path / "9999"; out.mkdir()
+    ingest.pull_car_data(9999, driver_numbers=[1, 44], raw_dir=tmp_path)
+
+    import polars as pl
+    df = pl.read_parquet(out / "car_data.parquet")
+    assert set(df["driver_number"].to_list()) == {1, 44}
+    assert df.height == 2

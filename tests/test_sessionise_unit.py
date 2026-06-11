@@ -193,6 +193,36 @@ def test_join_stints_tyre_age_resets_at_stint_boundary():
     assert result["tyre_age_laps"].to_list() == [0, 1, 0]
 
 
+def test_join_stints_overlapping_boundary_lap_is_new_stint():
+    # OpenF1 stint ranges share the boundary lap (stint 1 lap_end == stint 2
+    # lap_start). That lap must yield exactly ONE row, belonging to the new stint
+    # (its out-lap, tyre_age 0) — no duplicate driver-lap.
+    laps = pl.DataFrame({
+        "session_key": [9161] * 3,
+        "driver_number": [1, 1, 1],
+        "lap_number": [11, 12, 13],
+        "date_start": ["2023-01-01T14:00:00+00:00"] * 3,
+        "lap_time": [90.0] * 3,
+    })
+    stints = pl.DataFrame({
+        "driver_number": [1, 1],
+        "stint_number": [1, 2],
+        "lap_start": [1, 12],     # lap 12 is in BOTH stint 1 (ends 12) and stint 2
+        "lap_end": [12, 42],
+        "compound": ["MEDIUM", "HARD"],
+        "tyre_age_at_start": [0, 0],
+    })
+    result = _join_stints(laps, stints).sort("lap_number")
+    # No duplicate driver-laps.
+    assert result.height == 3
+    assert result.select(["driver_number", "lap_number"]).is_duplicated().sum() == 0
+    # Boundary lap 12 belongs to the new stint (HARD, age 0).
+    row12 = result.filter(pl.col("lap_number") == 12)
+    assert row12["stint_number"][0] == 2
+    assert row12["tyre_compound"][0] == "HARD"
+    assert row12["tyre_age_laps"][0] == 0
+
+
 def test_add_pit_from_stints_derives_flags():
     # After _join_stints the lap table carries stint_number. A new stint
     # (number > 1) starting IS a pit stop; stops_completed = stint_number - 1.

@@ -6,8 +6,9 @@ data:
 
 runs_dir: runs
 
-seasons: [2023, 2024]
-val_cutoff: "2024-07-01"
+seasons: [2023, 2024, 2025, 2026]
+val_start: "2025-09-01"
+test_start: "2026-01-01"
 
 circuits:
   excluded:
@@ -18,6 +19,6 @@ circuits:
     - las_vegas
     - miami
 
-snapshot_laps: [10, 20, 30, 40]
+snapshot_laps: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 num_drivers: 20
 driver_embedding_count: 30

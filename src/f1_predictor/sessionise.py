@@ -138,7 +138,11 @@ def _join_stints(lap_table: pl.DataFrame, stints_df: pl.DataFrame) -> pl.DataFra
         "compound", "tyre_age_at_start",
     ])
 
-    # Cross-join on driver then filter to the matching stint range
+    # Cross-join on driver then filter to the matching stint range. OpenF1 stint
+    # ranges are inclusive and adjacent stints SHARE the boundary lap (stint 1
+    # lap_end == stint 2 lap_start), so the boundary lap matches two stints. The
+    # boundary lap is the new stint's out-lap (fresh tyres, age 0), so keep the
+    # highest stint_number per (driver, lap) — one row per driver-lap.
     result = (
         lap_table
         .join(stints, on="driver_number", how="left")
@@ -146,6 +150,8 @@ def _join_stints(lap_table: pl.DataFrame, stints_df: pl.DataFrame) -> pl.DataFra
             (pl.col("lap_number") >= pl.col("lap_start")) &
             (pl.col("lap_number") <= pl.col("lap_end"))
         )
+        .sort(["driver_number", "lap_number", "stint_number"])
+        .unique(subset=["driver_number", "lap_number"], keep="last", maintain_order=True)
         .with_columns([
             pl.col("compound").alias("tyre_compound"),
             (
