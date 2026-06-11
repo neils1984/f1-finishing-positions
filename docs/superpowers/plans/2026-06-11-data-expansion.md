@@ -1,10 +1,10 @@
-# Data Expansion for the LightGBM Baseline — Implementation Plan
+# Data Expansion + 2026 Drift Diagnostic — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Grow the training data and revive the one dead feature so the Option B LightGBM baseline is measured at its true ceiling — to decide whether the Transformer is still needed.
+**Goal:** Grow the training data to all complete seasons (2023–2025), then measure how badly the model degrades on the regulation-changed 2026 season ("drift diagnostic") — to decide whether the GBM generalises, whether adaptation is needed, and whether the Transformer is still warranted.
 
-**Architecture:** Three independent data levers, applied as separately-measured increments so each one's effect on test Spearman vs the naive baseline is attributable: (A) denser snapshot laps, (B) add the 2025 season + re-split chronologically, (C) backfill `max_speed_kmh` from per-driver car telemetry. A shared, tested naive-baseline harness (Task 1) is the yardstick for every checkpoint.
+**Architecture:** Measure-first. Train on every complete season (2023+2024+2025) and hold out **all of 2026-so-far as a pure test set** to quantify distribution shift. A shared naive-baseline harness is the yardstick. Three data levers are applied as separately-measured increments: (A) add 2025+2026 with a generalised chronological split, (B) denser snapshot laps, (C) backfill `max_speed_kmh`. Adaptation machinery (regulation-era feature, sample weighting, fine-tuning) is **staged but deferred** — it only activates once 2026 enters *training*, which this plan does not do.
 
 **Tech Stack:** Polars, DuckDB, LightGBM, Typer, pytest, OpenF1 REST API, `uv`.
 
@@ -12,48 +12,49 @@
 
 ## Context & Findings (read before starting)
 
-These were verified against the live API and current code on 2026-06-11:
+Verified against the live API and current code on 2026-06-11:
 
-- **OpenF1 has no pre-2023 data.** `sessions?year=2021` and `year=2022` return zero races. "More history" backward is impossible; the only new full season available is **2025** (24 races, complete) — currently **not pulled**. 2026 is only ~8 races into the calendar, so it is excluded here.
-- **Current data on disk:** 2023 (21 usable races) + 2024 (23 usable races). 2025 roughly doubles the race count (44 → ~67).
-- **`assign_split` hardcodes `_VAL_YEAR = 2024`** (`src/f1_predictor/snapshots.py:19`). Adding 2025 *requires* making the val year configurable, or 2024 races wrongly fall into val/test. Task 4 fixes this.
-- **The current baseline** (committed): Option B L1 delta-regression, test Spearman **0.836** vs naive **0.809**, on splits train=2023 / val=2024-H1 / test=2024-H2, snapshot_laps `[10,20,30,40]`.
-- **Snapshot-lap density is a weaker lever than it looks:** lap 10 and lap 15 of the *same* race are highly correlated, so denser laps add groups but not much *independent* signal, and they shift the evaluation mix earlier. Treat Group A as a measured experiment, not an assumed win.
-- **The car_data ingest is the only missing piece for `max_speed_kmh`.** `sessionise._add_car_data` (`src/f1_predictor/sessionise.py:193`) already aggregates `speed`→`max_speed_kmh` per driver-lap *when a `car_data.parquet` exists*; today it doesn't, so the column is null everywhere. Group C only needs the per-driver *pull*. Per-session car_data returns HTTP 422 ("too much data") — it must be fetched per `driver_number` (see [[openf1-real-data-gotchas]]).
+- **OpenF1 has no pre-2023 data.** Backward history is impossible. Complete seasons available: **2023, 2024, 2025**. **2026 is in-progress** (~8 completed races; the API lists the full 24-race calendar but unraced events return empty `/laps`, which `sessionise` already skips).
+- **On disk today:** 2023 (21 usable races) + 2024 (23). **2025 and 2026 are NOT pulled.**
+- **2026 has new technical regulations** → materially different racing (more overtaking). The hypothesis under test: **current grid position predicts final order less well in 2026, so the naive baseline degrades** — and that degradation measures the drift.
+- **Why pooled training does NOT auto-adapt:** a model trained on 2023–2026 learns the *average* regime, dominated by the 2023–2025 majority (~67 races vs ~8). The Transformer's cross-driver attention models *relative race state within a race*, not *temporal regime shift across seasons* — neither GBM nor Transformer "knows the year" unless given a regime signal. Adaptation requires an explicit mechanism (regulation-era feature / sample weighting / fine-tuning), all deferred here until the diagnostic justifies them.
+- **`assign_split` uses a single `val_cutoff` + hardcoded `_VAL_YEAR = 2024`** (`src/f1_predictor/snapshots.py:19,26`). Supporting three regime-separated blocks (pre-2026 train / late-2025 val / 2026 test) needs a **two-boundary** split. Task 2 generalises it.
+- **Current committed baseline:** Option B L1 delta-regression, test Spearman **0.836** vs naive **0.809** (train=2023 / val=2024H1 / test=2024H2, laps `[10,20,30,40]`).
+- **`max_speed_kmh` is null everywhere** — `sessionise._add_car_data` (`sessionise.py:193`) aggregates it *when a `car_data.parquet` exists*, but the ingest never pulls car_data (a per-session query 422s; must be fetched per `driver_number`). See [[openf1-real-data-gotchas]].
 
-**New chronological split (applied in Group B):** train = 2023 + 2024, val = 2025 before `2025-07-01`, test = 2025 on/after `2025-07-01`. This gives ~2× the training races and a clean fully-held-out season for val/test.
+**New chronological split (two date boundaries):**
+- `train` = races before `val_start` (`2025-09-01`) → 2023 + 2024 + early/mid 2025
+- `val` = `[val_start, test_start)` (`2025-09-01` … `2026-01-01`) → late-2025 slice, for early-stopping / a same-regime reference
+- `test` = on/after `test_start` (`2026-01-01`) → **all 2026-so-far, the drift probe**
 
-**Standing convention (from prior work):** real-data pulls and real-training runs are executed directly by the human partner / lead, not delegated to synthetic-data subagents. Code tasks (with synthetic-data tests) are subagent-friendly. Each task below is tagged `[code]` or `[data-run]` accordingly.
+**Standing convention:** real-data pulls and real-training runs (`[data-run]`) are executed directly by the lead, not delegated to synthetic-data subagents. Code tasks (`[code]`, synthetic-data tests) are subagent-friendly.
 
 ---
 
 ## File Structure
 
-- **Create** `scripts/eval_naive.py` — CLI that prints overall + per-lap Spearman for the naive baseline and (optionally) a run's predictions, against a snapshots dir. Reusable yardstick for every checkpoint.
-- **Modify** `src/f1_predictor/models/baseline_gbm.py` — add a tested `naive_predict(df)` helper (score = −current_rank).
-- **Modify** `src/f1_predictor/snapshots.py` — make `assign_split` / `build_snapshots` take a configurable `val_year`.
-- **Modify** `scripts/build_snapshots.py` — pass `val_year` from config.
-- **Modify** `config/default.yaml` — denser `snapshot_laps`, `seasons: [2023, 2024, 2025]`, `val_cutoff: "2025-07-01"`, add `val_year: 2025`.
-- **Modify** `src/f1_predictor/ingest.py` — add `pull_car_data(session_key, driver_numbers, raw_dir)` writing `car_data.parquet`; wire it into `pull_session`.
-- **Test** `tests/test_baseline_gbm.py`, `tests/test_snapshots_unit.py`, `tests/test_ingest.py` — new behaviour.
+- **Create** `scripts/eval_naive.py` — prints naive (and optional model) Spearman per split + per lap. The yardstick.
+- **Modify** `src/f1_predictor/models/baseline_gbm.py` — add tested `naive_predict(df)` (score = −current_rank).
+- **Modify** `src/f1_predictor/snapshots.py` — generalise `assign_split` / `build_snapshots` to `val_start` + `test_start`; drop `_VAL_YEAR`.
+- **Modify** `scripts/build_snapshots.py` + `config/default.yaml` — two-boundary split config, denser `snapshot_laps`, `seasons: [2023,2024,2025,2026]`.
+- **Modify** `src/f1_predictor/ingest.py` — `pull_car_data(session_key, driver_numbers, raw_dir)`; wire into `pull_session`.
+- **Modify** `src/f1_predictor/features.py` — add inert-for-now `is_2026_regs` regulation-era feature (adaptation-prep, Task 8).
+- **Test** `tests/test_baseline_gbm.py`, `tests/test_snapshots_unit.py`, `tests/test_ingest.py`, `tests/test_features_unit.py`.
 
 ---
 
 ## Task 1: Naive-baseline measurement harness `[code]`
 
-The yardstick used after every lever. Naive score = −current_rank (predict final order = current order).
+Yardstick used at every checkpoint. Naive score = −current_rank (predict final order = current order).
 
-**Files:**
-- Modify: `src/f1_predictor/models/baseline_gbm.py`
-- Create: `scripts/eval_naive.py`
-- Test: `tests/test_baseline_gbm.py`
+**Files:** Modify `src/f1_predictor/models/baseline_gbm.py`; Create `scripts/eval_naive.py`; Test `tests/test_baseline_gbm.py`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 def test_naive_predict_scores_current_order():
-    # Naive = predict no movement: score must be a strictly decreasing function
-    # of current race position, so P1 (lowest position) gets the highest score.
+    # Naive = predict no movement: score is strictly decreasing in current
+    # position, so P1 (lowest position) gets the highest score.
     df = pl.DataFrame({
         "session_key": [0, 0, 0, 0],
         "snapshot_lap": [20, 20, 20, 20],
@@ -64,15 +65,15 @@ def test_naive_predict_scores_current_order():
     from f1_predictor.models.baseline_gbm import naive_predict
     scores = naive_predict(df)
     order = df.with_columns(pl.Series("score", scores)).sort("score", descending=True)
-    assert order["driver_number"].to_list() == [44, 1, 16, 55]  # = current order
+    assert order["driver_number"].to_list() == [44, 1, 16, 55]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_baseline_gbm.py::test_naive_predict_scores_current_order -v`
-Expected: FAIL with `ImportError: cannot import name 'naive_predict'`.
+Expected: FAIL — `ImportError: cannot import name 'naive_predict'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement**
 
 Add to `src/f1_predictor/models/baseline_gbm.py`:
 
@@ -93,8 +94,11 @@ Expected: PASS.
 Create `scripts/eval_naive.py`:
 
 ```python
-"""CLI: print overall + per-lap Spearman for the naive baseline (and optionally
-a run's predictions) on a snapshots dir. The yardstick for every experiment."""
+"""CLI: per-split, per-lap Spearman for the naive baseline (and optionally a
+run's predictions). The yardstick for the drift diagnostic and every checkpoint.
+
+Reports val (same-regime reference) and test (the drift probe) so naive
+degradation from one to the other is visible in a single run."""
 from pathlib import Path
 
 import polars as pl
@@ -107,6 +111,8 @@ app = typer.Typer(add_completion=False)
 
 
 def _report(label: str, preds: pl.DataFrame) -> None:
+    if preds.is_empty():
+        typer.echo(f"\n=== {label} === (empty)"); return
     m = ranking_metrics(preds)
     typer.echo(f"\n=== {label} ===")
     typer.echo(f"overall spearman={m['spearman']:.4f}  top1={m['top1_accuracy']:.3f}  "
@@ -117,31 +123,35 @@ def _report(label: str, preds: pl.DataFrame) -> None:
         typer.echo(f"  lap{lap}: spearman={ml['spearman']:.4f}  n_groups={ml['n_groups']}")
 
 
+def _naive_frame(df: pl.DataFrame) -> pl.DataFrame:
+    return df.select(["session_key", "snapshot_lap", "driver_number", "final_position"]).with_columns(
+        pl.Series("score", naive_predict(df))
+    )
+
+
 @app.command()
 def main(
     snapshots_dir: Path = typer.Option(Path("data/snapshots"), "--snapshots-dir"),
-    run_dir: Path = typer.Option(None, "--run-dir", help="Optional run dir to compare"),
+    run_dir: Path = typer.Option(None, "--run-dir", help="Optional run dir to compare on TEST"),
 ) -> None:
-    test = pl.read_parquet(snapshots_dir / "test.parquet")
-    naive = test.select(["session_key", "snapshot_lap", "driver_number", "final_position"]).with_columns(
-        pl.Series("score", naive_predict(test))
-    )
-    _report("NAIVE on TEST", naive)
+    for split in ("val", "test"):
+        p = snapshots_dir / f"{split}.parquet"
+        if p.exists():
+            df = pl.read_parquet(p)
+            if not df.is_empty():
+                _report(f"NAIVE on {split.upper()}", _naive_frame(df))
     if run_dir is not None:
-        preds = pl.read_parquet(run_dir / "predictions_test.parquet")
-        _report(f"MODEL ({run_dir.name})", preds)
+        _report(f"MODEL ({run_dir.name}) on TEST", pl.read_parquet(run_dir / "predictions_test.parquet"))
 
 
 if __name__ == "__main__":
     app()
 ```
 
-- [ ] **Step 6: Run full baseline test file + the script against current data**
+- [ ] **Step 6: Verify against current data**
 
-Run: `uv run pytest tests/test_baseline_gbm.py -q`
-Expected: all pass.
-Run: `uv run python scripts/eval_naive.py`
-Expected: prints NAIVE on TEST with overall spearman ≈ 0.809 (this reproduces the known baseline against current snapshots — sanity check the harness).
+Run: `uv run pytest tests/test_baseline_gbm.py -q` → all pass.
+Run: `uv run python scripts/eval_naive.py` → prints NAIVE on TEST overall ≈ 0.809 (sanity check vs the known baseline; val may be empty on current data).
 
 - [ ] **Step 7: Commit**
 
@@ -152,60 +162,179 @@ git commit -m "feat: naive-baseline measurement harness (eval_naive + naive_pred
 
 ---
 
-## Task 2: Denser snapshot laps — config + tolerance test `[code]`
+## Task 2: Generalise the chronological split to two date boundaries `[code]`
 
-Change the snapshot grid from `[10,20,30,40]` to `[5,10,15,20,25,30,35,40,45,50]`. A snapshot lap absent from a short race must simply yield no rows for that race (not crash). Verify that tolerance, then re-measure.
+Replace `val_cutoff` + hardcoded `_VAL_YEAR` with explicit `val_start` / `test_start` so train can span 2023–mid-2025, val = late-2025, test = 2026.
 
-**Files:**
-- Modify: `config/default.yaml`
-- Test: `tests/test_snapshots_unit.py`
+**Files:** Modify `src/f1_predictor/snapshots.py`, `scripts/build_snapshots.py`, `config/default.yaml`; Test `tests/test_snapshots_unit.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test** (and update the existing `assign_split` tests to the new signature)
+
+```python
+def test_assign_split_uses_two_date_boundaries():
+    from f1_predictor.snapshots import assign_split
+    vs, ts = "2025-09-01", "2026-01-01"
+    assert assign_split("2023-03-05T15:00:00+00:00", vs, ts) == "train"
+    assert assign_split("2024-09-01T13:00:00+00:00", vs, ts) == "train"
+    assert assign_split("2025-04-01T13:00:00+00:00", vs, ts) == "train"  # early 2025 -> train
+    assert assign_split("2025-10-01T13:00:00+00:00", vs, ts) == "val"    # late 2025 -> val
+    assert assign_split("2026-03-15T13:00:00+00:00", vs, ts) == "test"   # 2026 -> test
+```
+
+Replace the four existing `assign_split` tests (`test_assign_split_2023_is_train`, `..._2024_before_cutoff_is_val`, `..._2024_on_or_after_cutoff_is_test`, `..._pre_2023_is_train`, lines ~46–61) with the test above — they assert the old single-cutoff signature and will otherwise fail to compile. Also update the `build_snapshots(...)` call in `test_snapshots_unit.py` (~line 117): replace `val_cutoff="2024-07-01"` with `val_start="2024-07-01", test_start="2099-01-01"` (so the existing fixture's 2-driver race still lands in val as before — pick boundaries that preserve that test's intent; verify by running it).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/test_snapshots_unit.py::test_assign_split_uses_two_date_boundaries -v`
+Expected: FAIL — `TypeError: assign_split() takes 2 positional arguments but 3 were given`.
+
+- [ ] **Step 3: Implement**
+
+In `src/f1_predictor/snapshots.py`, replace `assign_split` and drop the `_VAL_YEAR` constant:
+
+```python
+def assign_split(date_start: str, val_start: str, test_start: str) -> str:
+    """Classify a race into 'train' | 'val' | 'test' by two date boundaries.
+
+    train: before val_start.  val: [val_start, test_start).  test: >= test_start.
+    """
+    d = datetime.fromisoformat(date_start).date()
+    if d < datetime.fromisoformat(val_start).date():
+        return "train"
+    if d < datetime.fromisoformat(test_start).date():
+        return "val"
+    return "test"
+```
+
+Update `build_snapshots` to take `val_start: str, test_start: str` (replacing `val_cutoff`) and pass them to `assign_split`.
+
+- [ ] **Step 4: Run tests to verify**
+
+Run: `uv run pytest tests/test_snapshots_unit.py -q`
+Expected: all pass.
+
+- [ ] **Step 5: Wire config + CLI**
+
+In `config/default.yaml`, replace the `val_cutoff` line and `seasons`:
+
+```yaml
+seasons: [2023, 2024, 2025, 2026]
+val_start: "2025-09-01"
+test_start: "2026-01-01"
+```
+
+In `scripts/build_snapshots.py`, change the `build_snapshots(...)` call:
+
+```python
+        snapshot_laps=cfg["snapshot_laps"], val_start=cfg["val_start"],
+        test_start=cfg["test_start"], git_sha=_git_sha(),
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/f1_predictor/snapshots.py scripts/build_snapshots.py config/default.yaml tests/test_snapshots_unit.py
+git commit -m "feat: two-boundary chronological split (enables 2026 hold-out test)"
+```
+
+---
+
+## Task 3: Pull 2025 and 2026 `[data-run]`
+
+Network pull executed by the lead. 2025 full (~23 races after Monaco); 2026 partial (completed races only — empty `/laps` for unraced events is skipped downstream).
+
+- [ ] **Step 1: Pull**
+
+Run: `uv run python scripts/pull_season.py --year 2025`
+Run: `uv run python scripts/pull_season.py --year 2026`
+Expected: ~23 sessions for 2025, ~8 for 2026 (varies with the calendar to date). Sprints + Monaco auto-excluded.
+
+- [ ] **Step 2: Sanity-check**
+
+Run: `uv run python -c "from pathlib import Path; d=Path('data/raw'); print('sessions:', sum(1 for p in d.iterdir() if p.is_dir() and (p/'meta.json').exists()))"`
+Expected: count rises by ~31 vs before (was 45).
+Confirm a 2026 race has real laps (find one with the latest date_start):
+Run: `uv run python -c "import polars as pl, glob; fs=glob.glob('data/raw/*/sessions.parquet'); rows=[(pl.read_parquet(f).row(0,named=True)['date_start'], f) for f in fs]; d,f=sorted(rows)[-1]; print(d, f); print('laps:', pl.read_parquet(f.replace('sessions','laps')).height)"`
+Expected: a 2026 date and a non-zero lap count.
+
+- [ ] **Step 3: No commit** — `data/` is gitignored. Log the new session keys.
+
+---
+
+## Task 4: Re-run Stages 2–3, rebuild snapshots, RUN THE DRIFT DIAGNOSTIC `[data-run]`
+
+The centerpiece. Keep the **current `[10,20,30,40]` grid** here so the 2026 number is directly comparable to the committed 0.836; densify later (Task 5).
+
+- [ ] **Step 1: Sessionise + features for all races**
+
+Run: `uv run python scripts/run_pipeline.py`
+Expected: "Sessionised M races" / "Built features for M races" with M ≈ 75 (2023+2024+2025+2026-so-far). Watch for new-driver / new-circuit issues; priors use only prior races, so they self-populate chronologically.
+
+- [ ] **Step 2: Rebuild snapshots with the two-boundary split**
+
+Temporarily ensure `config/default.yaml` still has `snapshot_laps: [10, 20, 30, 40]` for this comparison.
+Run: `uv run python scripts/build_snapshots.py`
+Expected: `train` ≈ 2023+2024+early-2025, `val` = late-2025 slice, `test` = 2026-so-far. New `data_version=`.
+
+- [ ] **Step 3: Train Option B + run the diagnostic**
+
+Run: `uv run python scripts/train_baseline.py --no-mlflow`
+Run: `uv run python scripts/eval_naive.py --run-dir runs/<new-run-id>`
+
+- [ ] **Step 4: Interpret — DRIFT DIAGNOSTIC**
+
+Record and compare:
+- **Naive on VAL (late-2025) vs Naive on TEST (2026).** A large drop test-vs-val confirms the more-overtaking hypothesis (persistence breaks in 2026).
+- **Model on TEST vs Naive on TEST.** Does Option B still beat naive on 2026 (transferred dynamics) or fall behind (overfit to old persistence)?
+- **Per-lap, early laps especially** (lap 10) — where overtaking shows most and the project's lap-by-lap-confidence goal lives.
+
+This is the result that decides whether adaptation (a later phase) is needed. Write the three numbers + verdict into a memory updating [[baseline-is-delta-regression-not-lambdarank]].
+
+- [ ] **Step 5: No code commit** (config/data only; data gitignored).
+
+---
+
+## Task 5: Denser snapshot laps `[code]` + re-measure `[data-run]`
+
+Densify the grid for finer early-race resolution, then re-run the diagnostic.
+
+**Files:** Modify `config/default.yaml`; Test `tests/test_snapshots_unit.py`.
+
+- [ ] **Step 1: Characterisation test for absent-lap tolerance**
 
 ```python
 def test_extract_snapshots_skips_laps_absent_from_short_race():
-    # A race that ends at lap 12 must contribute rows only at laps that exist.
     feats = pl.DataFrame({
-        "session_key": [9001, 9001],
-        "lap_number": [5, 10],
-        "driver_number": [1, 1],
-        "final_position": [3, 3],
-        "position": [3, 3],
-        "gap_to_leader": [1.0, 1.0],
+        "session_key": [9001, 9001], "lap_number": [5, 10], "driver_number": [1, 1],
+        "final_position": [3, 3], "position": [3, 3], "gap_to_leader": [1.0, 1.0],
     })
     out = extract_snapshots(feats, snapshot_laps=[5, 10, 50],
                             feature_columns=["position", "gap_to_leader"])
-    assert sorted(out["snapshot_lap"].unique().to_list()) == [5, 10]  # no lap 50
+    assert sorted(out["snapshot_lap"].unique().to_list()) == [5, 10]
     assert out.height == 2
 ```
 
-(Add alongside the existing snapshot unit tests; `extract_snapshots` is already imported there. If not, add `from f1_predictor.snapshots import extract_snapshots`.)
-
-- [ ] **Step 2: Run test to verify it fails or passes**
+- [ ] **Step 2: Run it**
 
 Run: `uv run pytest tests/test_snapshots_unit.py::test_extract_snapshots_skips_laps_absent_from_short_race -v`
-Expected: PASS immediately is acceptable here — this is a **characterisation test** locking in existing tolerant behaviour before we rely on it. If it FAILS, fix `extract_snapshots` so absent laps yield no rows (the `lap_number.is_in(snapshot_laps)` filter already does this; a failure means something else regressed).
+Expected: PASS (characterisation — the `lap_number.is_in(snapshot_laps)` filter already tolerates absent laps). If it FAILS, something regressed — fix `extract_snapshots`.
 
-- [ ] **Step 3: Update the config grid**
+- [ ] **Step 3: Densify config**
 
-In `config/default.yaml` change:
+In `config/default.yaml`:
 
 ```yaml
 snapshot_laps: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 ```
 
-- [ ] **Step 4: Rebuild snapshots from existing features**
+- [ ] **Step 4: Rebuild + re-measure `[data-run]`**
 
 Run: `uv run python scripts/build_snapshots.py`
-Expected: prints train/val/test race counts and a new `data_version=`. Group counts per split should rise (more laps per race).
-
-- [ ] **Step 5: Re-measure naive + Option B at the new grid `[data-run]`**
-
 Run: `uv run python scripts/train_baseline.py --no-mlflow`
 Run: `uv run python scripts/eval_naive.py --run-dir runs/<new-run-id>`
-Record overall + per-lap Spearman for both naive and Option B. **Checkpoint A:** does denser sampling change the gap? (Expect early-lap groups to dominate and the absolute number to drop because early laps are harder — what matters is Option B vs naive *at each lap*, not the overall blend.)
+**Checkpoint:** does the finer grid change the 2026 model-vs-naive gap, especially at laps 5–15?
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add config/default.yaml tests/test_snapshots_unit.py
@@ -214,141 +343,13 @@ git commit -m "feat: denser snapshot-lap grid (5..50 by 5) + absent-lap toleranc
 
 ---
 
-## Task 3: Make the validation year configurable `[code]`
-
-`assign_split` must take `val_year` so 2023+2024 → train when 2025 is the held-out season.
-
-**Files:**
-- Modify: `src/f1_predictor/snapshots.py`
-- Test: `tests/test_snapshots_unit.py`
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-def test_assign_split_respects_configurable_val_year():
-    from f1_predictor.snapshots import assign_split
-    # val_year=2025: both 2023 and 2024 are train; 2025 splits on the cutoff.
-    assert assign_split("2024-09-01T13:00:00", "2025-07-01", val_year=2025) == "train"
-    assert assign_split("2025-04-01T13:00:00", "2025-07-01", val_year=2025) == "val"
-    assert assign_split("2025-08-01T13:00:00", "2025-07-01", val_year=2025) == "test"
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_snapshots_unit.py::test_assign_split_respects_configurable_val_year -v`
-Expected: FAIL with `TypeError: assign_split() got an unexpected keyword argument 'val_year'`.
-
-- [ ] **Step 3: Implement**
-
-In `src/f1_predictor/snapshots.py`, replace the module constant usage:
-
-```python
-def assign_split(date_start: str, val_cutoff: str, val_year: int = 2024) -> str:
-    """Classify a race into 'train' | 'val' | 'test' by its start date.
-
-    train: any race in a season before val_year.
-    val:   a val_year race strictly before val_cutoff.
-    test:  a val_year race on or after val_cutoff.
-    """
-    dt = datetime.fromisoformat(date_start)
-    cutoff = datetime.fromisoformat(val_cutoff).date()
-    if dt.year < val_year:
-        return "train"
-    return "val" if dt.date() < cutoff else "test"
-```
-
-Then thread `val_year` through `build_snapshots` (add a `val_year: int = 2024` parameter and pass it to the `assign_split(...)` call). Remove the now-unused `_VAL_YEAR = 2024` module constant.
-
-- [ ] **Step 4: Run tests to verify**
-
-Run: `uv run pytest tests/test_snapshots_unit.py -q`
-Expected: all pass (existing tests still pass because the default is 2024).
-
-- [ ] **Step 5: Wire config through the CLI**
-
-In `config/default.yaml` add:
-
-```yaml
-val_year: 2025
-```
-
-In `scripts/build_snapshots.py`, pass it:
-
-```python
-    meta = build_snapshots(
-        features_dir=features_dir, raw_dir=raw_dir, out_dir=out_dir,
-        feature_columns=FEATURE_COLUMNS,
-        snapshot_laps=cfg["snapshot_laps"], val_cutoff=cfg["val_cutoff"],
-        val_year=cfg["val_year"], git_sha=_git_sha(),
-    )
-```
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/f1_predictor/snapshots.py scripts/build_snapshots.py config/default.yaml tests/test_snapshots_unit.py
-git commit -m "feat: configurable val_year for chronological split (enables 2025 hold-out)"
-```
-
----
-
-## Task 4: Pull the 2025 season `[data-run]`
-
-Network pull executed directly by the lead (not a subagent). Honours rate limits; ~23 usable races after Monaco exclusion.
-
-- [ ] **Step 1: Pull**
-
-Run: `uv run python scripts/pull_season.py --year 2025`
-Expected: "Pulled N sessions for 2025" (N ≈ 23). Takes several minutes (rate limiting). Sprints and Monaco are auto-excluded by `pull_season`.
-
-- [ ] **Step 2: Sanity-check the pull**
-
-Run: `uv run python -c "from pathlib import Path; import polars as pl; d=Path('data/raw'); print('sessions on disk:', sum(1 for p in d.iterdir() if p.is_dir() and (p/'meta.json').exists()))"`
-Expected: count rises by ~23 vs before (was 45).
-Spot-check one 2025 race has non-empty `laps.parquet`:
-Run: `uv run python -c "import polars as pl, glob; f=sorted(glob.glob('data/raw/*/laps.parquet'))[-1]; print(f, pl.read_parquet(f).height)"`
-Expected: a non-zero lap count.
-
-- [ ] **Step 3: No commit** — `data/` is gitignored. Note the new session keys in the execution log.
-
----
-
-## Task 5: Re-run Stages 2–3 and rebuild snapshots on 2023+2024+2025 `[data-run]`
-
-- [ ] **Step 1: Sessionise + features for all races (incl. 2025)**
-
-Run: `uv run python scripts/run_pipeline.py`
-Expected: "Sessionised M races" / "Built features for M races" with M ≈ 67. Watch for new-season gotchas (new drivers, new circuits). Priors are computed across all sessionised races and use only prior races, so 2025 priors draw on 2023+2024+earlier-2025 automatically.
-
-- [ ] **Step 2: Eyeball a 2025 features table for nulls / sanity**
-
-Run: `uv run python -c "import polars as pl, glob; f=sorted(glob.glob('data/features/*.parquet'))[-1]; df=pl.read_parquet(f); print(df.select(['position','driver_circuit_finish_rate','distance_remaining_km']).describe())"`
-Expected: `position` integer-like 1..20, `distance_remaining_km` positive, `driver_circuit_finish_rate` in [0,1] (new drivers may be null/default — acceptable).
-
-- [ ] **Step 3: Rebuild snapshots with the 2025 hold-out split**
-
-Run: `uv run python scripts/build_snapshots.py`
-Expected: `train` ≈ 44 races (2023+2024), `val` + `test` = 2025 split on 2025-07-01. New `data_version=`.
-
-- [ ] **Step 4: Re-measure naive + Option B `[data-run]`**
-
-Run: `uv run python scripts/train_baseline.py --no-mlflow`
-Run: `uv run python scripts/eval_naive.py --run-dir runs/<new-run-id>`
-**Checkpoint B (the big one):** with ~2× training races and a fresh held-out season, does Option B's margin over naive grow? Record overall + per-lap. This is the strongest signal on whether data volume was the bottleneck.
-
-- [ ] **Step 5: No code commit** (config already committed in Tasks 2–3; data is gitignored). Record Checkpoint B numbers in the execution log / a memory.
-
----
-
 ## Task 6: Backfill `max_speed_kmh` from per-driver car telemetry `[code]`
 
-The heaviest, most-uncertain lever — **may be deferred** if Checkpoint B already closes the gap. Per-session car_data returns 422; fetch per `driver_number` and concatenate.
+Heaviest, most-uncertain lever — **may be deferred** if earlier checkpoints already settle the Transformer question. Per-session car_data 422s; fetch per `driver_number`.
 
-**Files:**
-- Modify: `src/f1_predictor/ingest.py`
-- Test: `tests/test_ingest.py`
+**Files:** Modify `src/f1_predictor/ingest.py`; Test `tests/test_ingest.py`.
 
-- [ ] **Step 1: Write the failing test** (mock the HTTP layer; no network)
+- [ ] **Step 1: Write the failing test** (mock HTTP; no network)
 
 ```python
 def test_pull_car_data_concatenates_per_driver(tmp_path, monkeypatch):
@@ -358,7 +359,7 @@ def test_pull_car_data_concatenates_per_driver(tmp_path, monkeypatch):
 
     class FakeResp:
         status_code = 200
-        def json(self):  # one speed row per driver, keyed off the URL's driver_number
+        def json(self):
             dn = int(calls[-1].split("driver_number=")[1])
             return [{"driver_number": dn, "date": "2025-03-16T05:00:00.000000+00:00", "speed": 250 + dn}]
         def raise_for_status(self): pass
@@ -377,25 +378,24 @@ def test_pull_car_data_concatenates_per_driver(tmp_path, monkeypatch):
     import polars as pl
     df = pl.read_parquet(out / "car_data.parquet")
     assert set(df["driver_number"].to_list()) == {1, 44}
-    assert df.height == 2  # one row per driver, concatenated
+    assert df.height == 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_ingest.py::test_pull_car_data_concatenates_per_driver -v`
-Expected: FAIL with `AttributeError: module 'f1_predictor.ingest' has no attribute 'pull_car_data'`.
+Expected: FAIL — `AttributeError: module 'f1_predictor.ingest' has no attribute 'pull_car_data'`.
 
-- [ ] **Step 3: Implement `pull_car_data` and wire it in**
+- [ ] **Step 3: Implement + wire in**
 
 Add to `src/f1_predictor/ingest.py`:
 
 ```python
 def pull_car_data(session_key: int, driver_numbers: list[int], raw_dir: Path) -> None:
-    """Pull car telemetry per driver and write a single car_data.parquet.
+    """Pull car telemetry per driver and write one car_data.parquet.
 
-    A per-session car_data query returns 422 ("too much data"), so OpenF1 must
-    be queried per driver_number. Each query is ~tens of thousands of rows; we
-    keep only what _add_car_data needs downstream (driver_number, date, speed).
+    A per-session car_data query 422s ("too much data"), so query per
+    driver_number. Keep only what _add_car_data needs: driver_number, date, speed.
     """
     frames: list[pl.DataFrame] = []
     with requests.Session() as s:
@@ -412,7 +412,7 @@ def pull_car_data(session_key: int, driver_numbers: list[int], raw_dir: Path) ->
     df.write_parquet(raw_dir / str(session_key) / "car_data.parquet")
 ```
 
-Then, in `pull_session`, after the main endpoint loop writes `drivers.parquet`, backfill car_data using the pulled driver list:
+In `pull_session`, after the `ENDPOINTS` loop (which writes `drivers.parquet`):
 
 ```python
     # car_data is pulled per driver (a per-session query 422s) — see module docstring.
@@ -422,17 +422,12 @@ Then, in `pull_session`, after the main endpoint loop writes `drivers.parquet`, 
     row_counts["car_data"] = pl.read_parquet(session_dir / "car_data.parquet").height
 ```
 
-(Keep `car_data` out of `ENDPOINTS` — it has its own pull path. Sessionise already lists `car_data` among the raw endpoints it reads at `sessionise.py:21`.)
+(Keep `car_data` out of `ENDPOINTS`; `sessionise.py:21` already reads `car_data` from the raw dir.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4–5: Verify**
 
-Run: `uv run pytest tests/test_ingest.py::test_pull_car_data_concatenates_per_driver -v`
-Expected: PASS.
-
-- [ ] **Step 5: Run the full ingest test file**
-
-Run: `uv run pytest tests/test_ingest.py -q`
-Expected: all pass.
+Run: `uv run pytest tests/test_ingest.py::test_pull_car_data_concatenates_per_driver -v` → PASS.
+Run: `uv run pytest tests/test_ingest.py -q` → all pass.
 
 - [ ] **Step 6: Commit**
 
@@ -445,49 +440,101 @@ git commit -m "feat: per-driver car_data pull to backfill max_speed_kmh"
 
 ## Task 7: Re-pull car_data, re-run pipeline, final measurement `[data-run]`
 
-- [ ] **Step 1: Force a re-pull so cached races get car_data**
+- [ ] **Step 1: Force re-pull so cached races gain car_data**
 
 Run: `uv run python scripts/pull_season.py --year 2023 --force`
 Run: `uv run python scripts/pull_season.py --year 2024 --force`
 Run: `uv run python scripts/pull_season.py --year 2025 --force`
-Expected: each race now has a non-empty `car_data.parquet`. **This is the heaviest network step** (~20 drivers × ~67 races). Honours Retry-After; expect a long run. Spot-check:
+Run: `uv run python scripts/pull_season.py --year 2026 --force`
+**Heaviest network step** (~20 drivers × ~75 races). Honours Retry-After; expect a long run. Spot-check:
 Run: `uv run python -c "import polars as pl, glob; f=sorted(glob.glob('data/raw/*/car_data.parquet'))[-1]; df=pl.read_parquet(f); print(f, df.height, df['speed'].max())"`
-Expected: large row count, a plausible top speed (~300–360 km/h).
+Expected: large row count, plausible top speed (~300–360).
 
 - [ ] **Step 2: Re-run Stages 2–4**
 
 Run: `uv run python scripts/run_pipeline.py`
 Run: `uv run python scripts/build_snapshots.py`
-Then verify `max_speed_kmh` is now populated:
 Run: `uv run python -c "import polars as pl; df=pl.read_parquet('data/snapshots/train.parquet'); print('max_speed non-null frac:', df['max_speed_kmh'].is_not_null().mean())"`
-Expected: well above 0 (it was 0 before). Note: snapshots store the column standardised; check the pre-scaling features table if you want raw km/h.
+Expected: well above 0 (was 0 before).
 
 - [ ] **Step 3: Final measurement `[data-run]`**
 
 Run: `uv run python scripts/train_baseline.py --no-mlflow`
 Run: `uv run python scripts/eval_naive.py --run-dir runs/<new-run-id>`
-**Checkpoint C:** does reviving `max_speed_kmh` move Option B vs naive? Record overall + per-lap.
-
-- [ ] **Step 4: Record the decision**
-
-Write a memory updating [[baseline-is-delta-regression-not-lambdarank]] with the three checkpoint results and the verdict: **is the gap over naive now large enough, and does the Transformer still look necessary?** This is the question that motivated the whole plan.
+**Checkpoint:** does reviving `max_speed_kmh` move the 2026 model-vs-naive gap?
 
 ---
 
-## Decision Checkpoint: Transformer or not?
+## Task 8: Stage the regulation-era feature (adaptation-prep) `[code]`
 
-After Checkpoint C, compare the best Option B test Spearman (and especially the **early-lap** numbers — lap 5/10/15, where naive is weakest and the project's lap-by-lap-confidence goal lives) against naive:
+Add an `is_2026_regs` context feature now so it's ready when 2026 enters *training* in a future adaptation phase. **It is inert in this plan's diagnostic** (constant-False across all-pre-2026 training → zero variance → scaler maps it to 0 → GBM can't split on it), so it must not change the diagnostic numbers — a guard test asserts a constant feature is harmless.
 
-- **If Option B now clears naive by a healthy, consistent margin across laps** and early-lap accuracy is acceptable → the Transformer may be deferred; bank the GBM and move to the lap-by-lap visualiser (Build Order step 7).
-- **If the margin is still thin, or early-lap ranking is poor** → the cross-driver joint-consistency the Transformer provides is the next lever; proceed to `docs/superpowers/plans/2026-06-08-transformer.md` (revise its baseline-comparison section to use Option B, not lambdarank).
+**Files:** Modify `src/f1_predictor/features.py`; Test `tests/test_features_unit.py`.
 
-This plan deliberately does **not** decide the Transformer's fate up front — it produces the measurements needed to decide it.
+- [ ] **Step 1: Write the failing test**
+
+```python
+def test_is_2026_regs_flags_regulation_era():
+    # The feature is True for 2026+ races, False otherwise — the principled slot
+    # for "this is a different regulation regime" (analogous to is_street_circuit).
+    from f1_predictor.features import _regulation_era_flag  # helper under test
+    assert _regulation_era_flag("2026-03-15T13:00:00+00:00") is True
+    assert _regulation_era_flag("2025-03-15T13:00:00+00:00") is False
+    assert _regulation_era_flag("2023-07-01T13:00:00+00:00") is False
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/test_features_unit.py::test_is_2026_regs_flags_regulation_era -v`
+Expected: FAIL — `ImportError: cannot import name '_regulation_era_flag'`.
+
+- [ ] **Step 3: Implement**
+
+In `src/f1_predictor/features.py`:
+
+```python
+def _regulation_era_flag(date_start: str) -> bool:
+    """True for the 2026+ technical-regulation era (different car/racing dynamics)."""
+    from datetime import datetime
+    return datetime.fromisoformat(date_start).year >= 2026
+```
+
+Add `is_2026_regs` to the per-race feature construction (set from the race's `date_start`, like other race-level constants) and append `"is_2026_regs"` to `FEATURE_COLUMNS`. Cast to Float64 in the snapshot pipeline path as with other booleans (the existing `_impute` handles bool→float).
+
+- [ ] **Step 4: Verify**
+
+Run: `uv run pytest tests/test_features_unit.py -q` → all pass.
+Run: `uv run pytest tests/ -q` → full suite green (the new 31st feature must not break snapshot/scaler tests; if a test hardcodes 30 features, update it).
+
+- [ ] **Step 5: Re-run the diagnostic to confirm inertness `[data-run]`**
+
+Run: `uv run python scripts/run_pipeline.py && uv run python scripts/build_snapshots.py && uv run python scripts/train_baseline.py --no-mlflow`
+Expected: test Spearman essentially unchanged from Task 7 (the feature is constant in train → inert). Confirms the column is safely staged for adaptation.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/f1_predictor/features.py tests/test_features_unit.py
+git commit -m "feat: stage is_2026_regs regulation-era feature (inert until 2026 trains)"
+```
+
+---
+
+## Decision Checkpoint + Deferred Adaptation Phase
+
+After Task 4 (and refined by 5/7), use the drift numbers to decide:
+
+- **If naive barely degrades on 2026 and Option B still beats it** → 2026 dynamics transfer; no urgent adaptation. Proceed toward the Transformer (`docs/superpowers/plans/2026-06-08-transformer.md`, revised to benchmark Option B) or the lap-by-lap visualiser.
+- **If naive collapses and/or the model underperforms naive on 2026** → drift is real. Open a **follow-up adaptation plan** that *includes 2026 in training* (respecting within-2026 chronology) and tries, in order: (1) activate `is_2026_regs` (now staged), (2) per-sample loss weighting with a tuned 2026 upweight measured on a held-out 2026 slice, (3) pre-train pre-2026 → fine-tune on 2026 (only if enough 2026 races have accrued). The Transformer needs the same regime signal — attention alone does not adapt to season drift.
+
+This plan deliberately measures before adapting; adaptation is a separate, evidence-gated plan.
 
 ---
 
 ## Self-Review Notes
 
-- **Spec coverage:** all three user-requested levers (denser snapshot laps → Task 2; more seasons → Tasks 3–5; `max_speed_kmh` backfill → Tasks 6–7) are covered, plus the prerequisite `val_year` fix and a reusable measurement harness.
-- **Ordering rationale:** cheapest/most-informative first (no-network denser laps), then the big data lever (2025), then the heaviest/most-uncertain (telemetry backfill) last so it can be dropped if the gap already closes.
-- **Attribution:** each lever ends in its own checkpoint against the same naive yardstick, so the Transformer decision rests on per-lever evidence, not a single blended number.
-- **Possible split:** if Group C (Tasks 6–7) balloons or its telemetry volume proves impractical, it is cleanly separable into its own follow-up plan — Tasks 1–5 stand alone and produce a working, measured result.
+- **Spec coverage:** 2026 test (Tasks 3–4), more seasons (2025; Tasks 2–4), denser laps (Task 5), `max_speed_kmh` backfill (Tasks 6–7), regulation-era feature staged (Task 8), drift accounted for via measure-first + a deferred adaptation phase.
+- **Key correction baked in:** the Transformer does not auto-adapt to season drift; the regime feature is inert until 2026 enters training (Task 8 guards this).
+- **Ordering:** harness → split refactor → pull → **diagnostic (current grid, directly comparable to 0.836)** → densify → telemetry backfill → stage regime feature. Cheapest/most-informative first; heaviest/most-uncertain last and deferrable.
+- **Methodology guardrail:** 2026 is in-progress — it is used only as a *held-out test* here; any future training on it must respect within-2026 chronology.
+- **Splittable:** Tasks 6–8 are cleanly separable into follow-up plans; Tasks 1–5 stand alone and deliver the diagnostic.
