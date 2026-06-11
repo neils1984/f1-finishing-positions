@@ -29,6 +29,19 @@ def test_extract_snapshots_picks_snapshot_laps_only():
     assert snaps.filter(pl.col("snapshot_lap") == 3).height == 1
 
 
+def test_extract_snapshots_skips_laps_absent_from_short_race():
+    # A snapshot lap that doesn't exist in a short race must yield no rows for it
+    # (no crash). Lets a denser grid include late laps that only long races reach.
+    feats = pl.DataFrame({
+        "session_key": [9001, 9001], "lap_number": [5, 10], "driver_number": [1, 1],
+        "final_position": [3, 3], "position": [3, 3], "gap_to_leader": [1.0, 1.0],
+    })
+    out = extract_snapshots(feats, snapshot_laps=[5, 10, 50],
+                            feature_columns=["position", "gap_to_leader"])
+    assert sorted(out["snapshot_lap"].unique().to_list()) == [5, 10]
+    assert out.height == 2
+
+
 def test_extract_snapshots_relevance_is_21_minus_final_position():
     snaps = extract_snapshots(_mini_features(), snapshot_laps=[2], feature_columns=["position"])
     d1 = snaps.filter(pl.col("driver_number") == 1)

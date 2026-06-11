@@ -19,6 +19,6 @@ circuits:
     - las_vegas
     - miami
 
-snapshot_laps: [10, 20, 30, 40]
+snapshot_laps: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 num_drivers: 20
 driver_embedding_count: 30
