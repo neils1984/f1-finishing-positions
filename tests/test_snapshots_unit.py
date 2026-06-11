@@ -43,22 +43,14 @@ def test_extract_snapshots_carries_keys_and_features():
         assert c in snaps.columns
 
 
-def test_assign_split_2023_is_train():
-    assert assign_split("2023-03-05T15:00:00+00:00", "2024-07-01") == "train"
-
-
-def test_assign_split_2024_before_cutoff_is_val():
-    assert assign_split("2024-03-02T15:00:00+00:00", "2024-07-01") == "val"
-
-
-def test_assign_split_2024_on_or_after_cutoff_is_test():
-    assert assign_split("2024-07-07T13:00:00+00:00", "2024-07-01") == "test"
-    assert assign_split("2024-07-01T00:00:00+00:00", "2024-07-01") == "test"
-
-
-def test_assign_split_pre_2023_is_train():
-    # Any race earlier than the val season counts as train.
-    assert assign_split("2022-11-20T13:00:00+00:00", "2024-07-01") == "train"
+def test_assign_split_uses_two_date_boundaries():
+    from f1_predictor.snapshots import assign_split
+    vs, ts = "2025-09-01", "2026-01-01"
+    assert assign_split("2023-03-05T15:00:00+00:00", vs, ts) == "train"
+    assert assign_split("2024-09-01T13:00:00+00:00", vs, ts) == "train"
+    assert assign_split("2025-04-01T13:00:00+00:00", vs, ts) == "train"  # early 2025 -> train
+    assert assign_split("2025-10-01T13:00:00+00:00", vs, ts) == "val"    # late 2025 -> val
+    assert assign_split("2026-03-15T13:00:00+00:00", vs, ts) == "test"   # 2026 -> test
 
 
 def test_fit_scaler_uses_train_only_and_imputes_nulls():
@@ -114,7 +106,7 @@ def test_build_snapshots_writes_splits_and_metadata(tmp_path):
     build_snapshots(
         features_dir=features_dir, raw_dir=raw_dir, out_dir=out_dir,
         feature_columns=["position", "gap_to_leader"],
-        snapshot_laps=[2, 4], val_cutoff="2024-07-01", git_sha="deadbeef",
+        snapshot_laps=[2, 4], val_start="2024-01-01", test_start="2024-07-01", git_sha="deadbeef",
     )
 
     for split in ("train", "val", "test"):

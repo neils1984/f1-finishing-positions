@@ -15,26 +15,22 @@ import numpy as np
 import polars as pl
 from sklearn.preprocessing import StandardScaler
 
-# The validation season; anything earlier is train.
-_VAL_YEAR = 2024
-
 RELEVANCE_BASE = 21  # relevance = RELEVANCE_BASE - final_position (higher = better)
 
 _META_COLUMNS = ["session_key", "snapshot_lap", "driver_number", "final_position", "relevance"]
 
 
-def assign_split(date_start: str, val_cutoff: str) -> str:
-    """Classify a race into 'train' | 'val' | 'test' by its start date.
+def assign_split(date_start: str, val_start: str, test_start: str) -> str:
+    """Classify a race into 'train' | 'val' | 'test' by two date boundaries.
 
-    train: any race before the validation season (2024).
-    val:   a 2024 race strictly before val_cutoff.
-    test:  a 2024 race on or after val_cutoff.
+    train: before val_start.  val: [val_start, test_start).  test: >= test_start.
     """
-    dt = datetime.fromisoformat(date_start)
-    cutoff = datetime.fromisoformat(val_cutoff).date()
-    if dt.year < _VAL_YEAR:
+    d = datetime.fromisoformat(date_start).date()
+    if d < datetime.fromisoformat(val_start).date():
         return "train"
-    return "val" if dt.date() < cutoff else "test"
+    if d < datetime.fromisoformat(test_start).date():
+        return "val"
+    return "test"
 
 
 def extract_snapshots(
@@ -106,11 +102,13 @@ def build_snapshots(
     out_dir: Path,
     feature_columns: list[str],
     snapshot_laps: list[int],
-    val_cutoff: str,
+    val_start: str,
+    test_start: str,
     git_sha: str = "unknown",
 ) -> dict:
     """Build train/val/test snapshot parquets + metadata.json. Returns metadata.
 
+    Races are split by two date boundaries: train < val_start <= val < test_start <= test.
     Scaler is fit on the train split only and applied to all splits.
     """
     keys = sorted(int(p.stem) for p in features_dir.glob("*.parquet"))
@@ -119,7 +117,7 @@ def build_snapshots(
     split_keys: dict[str, list[int]] = {"train": [], "val": [], "test": []}
     raw_by_split: dict[str, list[pl.DataFrame]] = {"train": [], "val": [], "test": []}
     for key in keys:
-        split = assign_split(_race_date(raw_dir, key), val_cutoff)
+        split = assign_split(_race_date(raw_dir, key), val_start, test_start)
         feats = pl.read_parquet(features_dir / f"{key}.parquet")
         snaps = extract_snapshots(feats, snapshot_laps, feature_columns)
         # Guard: each driver must appear at most once per (race, snapshot_lap).

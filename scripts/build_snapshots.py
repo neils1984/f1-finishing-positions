@@ -29,7 +29,8 @@ def main(
     meta = build_snapshots(
         features_dir=features_dir, raw_dir=raw_dir, out_dir=out_dir,
         feature_columns=FEATURE_COLUMNS,
-        snapshot_laps=cfg["snapshot_laps"], val_cutoff=cfg["val_cutoff"],
+        snapshot_laps=cfg["snapshot_laps"], val_start=cfg["val_start"],
+        test_start=cfg["test_start"],
         git_sha=_git_sha(),
     )
     for split, ks in meta["splits"].items():
