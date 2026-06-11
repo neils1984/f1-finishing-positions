@@ -286,3 +286,12 @@ def test_stops_vs_median():
     })
     out = _add_stops_vs_median(df).sort("driver_number")
     assert out["stops_vs_median"].to_list() == [-1.0, 0.0, 1.0]
+
+
+def test_is_2026_regs_flags_regulation_era():
+    # True for 2026+ races (new technical regs), False otherwise — analogous to
+    # is_street_circuit, the principled slot for "this is a different regime".
+    from f1_predictor.features import _regulation_era_flag
+    assert _regulation_era_flag("2026-03-15T13:00:00+00:00") is True
+    assert _regulation_era_flag("2025-03-15T13:00:00+00:00") is False
+    assert _regulation_era_flag("2023-07-01T13:00:00+00:00") is False

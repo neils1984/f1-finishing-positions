@@ -23,6 +23,7 @@ FEATURE_COLUMNS = [
     "is_street_circuit",
     "driver_circuit_finish_rate", "driver_championship_standing",
     "team_circuit_finish_rate", "team_championship_standing",
+    "is_2026_regs",
 ]
 
 _KEY_COLUMNS = ["session_key", "driver_number", "lap_number", "final_position"]
@@ -45,6 +46,12 @@ def circuit_length_km(circuit_short_name: str, circuits: dict) -> float | None:
 def is_street_circuit(circuit_short_name: str, circuits: dict) -> bool:
     """True if the circuit is a street circuit (Baku/Singapore/Las Vegas/Miami)."""
     return circuit_short_name in set(circuits.get("street", []))
+
+
+def _regulation_era_flag(date_start: str) -> bool:
+    """True for the 2026+ technical-regulation era (different car/racing dynamics)."""
+    from datetime import datetime
+    return datetime.fromisoformat(date_start).year >= 2026
 
 
 _GAP_COLUMNS = ["gap_to_leader", "interval_to_ahead"]
@@ -311,6 +318,7 @@ def build_features(
     df = _add_tyre_onehot(df)
     df = _add_stops_vs_median(df)
     df = df.with_columns(pl.lit(is_street_circuit(circuit, circuits)).alias("is_street_circuit"))
+    df = df.with_columns(pl.lit(_regulation_era_flag(ses["date_start"])).alias("is_2026_regs"))
 
     race_priors = priors.filter(pl.col("session_key") == session_key).drop("session_key")
     df = df.join(race_priors, on="driver_number", how="left")
