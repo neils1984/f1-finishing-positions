@@ -70,6 +70,27 @@ def _fetch(s: requests.Session, url: str) -> list[dict]:
     return resp.json()
 
 
+def pull_car_data(session_key: int, driver_numbers: list[int], raw_dir: Path) -> None:
+    """Pull car telemetry per driver and write one car_data.parquet.
+
+    A per-session car_data query 422s ("too much data"), so query per
+    driver_number. Keep only what _add_car_data needs: driver_number, date, speed.
+    """
+    frames: list[pl.DataFrame] = []
+    with requests.Session() as s:
+        for dn in driver_numbers:
+            url = f"{OPENF1_BASE}/car_data?session_key={session_key}&driver_number={dn}"
+            data = _fetch(s, url)
+            if data:
+                frames.append(
+                    pl.DataFrame(data, infer_schema_length=None)
+                    .select(["driver_number", "date", "speed"])
+                )
+            time.sleep(_BASE_DELAY)
+    df = pl.concat(frames, how="vertical") if frames else pl.DataFrame()
+    df.write_parquet(raw_dir / str(session_key) / "car_data.parquet")
+
+
 def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
     """Pull all endpoints for one race session. Skips if already cached."""
     session_dir = raw_dir / str(session_key)
@@ -94,6 +115,12 @@ def pull_session(session_key: int, raw_dir: Path, force: bool = False) -> None:
             row_counts[endpoint] = len(df)
 
             time.sleep(_BASE_DELAY)
+
+    # car_data is pulled per driver (a per-session query 422s) — see module docstring.
+    drivers_df = pl.read_parquet(session_dir / "drivers.parquet")
+    driver_numbers = drivers_df["driver_number"].unique().to_list() if not drivers_df.is_empty() else []
+    pull_car_data(session_key, driver_numbers, raw_dir)
+    row_counts["car_data"] = pl.read_parquet(session_dir / "car_data.parquet").height
 
     meta = {
         "session_key": session_key,
