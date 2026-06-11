@@ -1,0 +1,23 @@
+data:
+  raw_dir: data/raw
+  sessions_dir: data/sessions
+  features_dir: data/features
+  snapshots_dir: data/snapshots
+
+runs_dir: runs
+
+seasons: [2023, 2024]
+val_cutoff: "2024-07-01"
+
+circuits:
+  excluded:
+    - monaco
+  street:
+    - baku
+    - singapore
+    - las_vegas
+    - miami
+
+snapshot_laps: [10, 20, 30, 40]
+num_drivers: 20
+driver_embedding_count: 30
