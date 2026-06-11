@@ -13,6 +13,10 @@ runs/
 
 # MLflow
 mlruns/
+mlflow.db
+
+# DuckDB convenience database (regenerate via scripts/duckdb_views.sql)
+f1.duckdb
 
 # OS
 .DS_Store
