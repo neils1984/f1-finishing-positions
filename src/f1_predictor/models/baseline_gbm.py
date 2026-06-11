@@ -53,6 +53,12 @@ def add_current_rank(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def naive_predict(df: pl.DataFrame) -> np.ndarray:
+    """Naive persistence baseline: score = -current_rank (predict no movement)."""
+    df = add_current_rank(df)
+    return -df["current_rank"].to_numpy().astype(float)
+
+
 def _delta_target(df: pl.DataFrame) -> pl.Series:
     """Places gained = current_rank - final_position (requires `current_rank`)."""
     return (df["current_rank"] - df["final_position"]).cast(pl.Float64)

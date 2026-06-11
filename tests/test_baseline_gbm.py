@@ -96,3 +96,19 @@ def test_run_baseline_end_to_end(tmp_path):
     assert (run_dir / "predictions_test.parquet").exists()
     # The signal is perfectly learnable -> strong positive test Spearman.
     assert result["metrics"]["spearman"] > 0.9
+
+
+def test_naive_predict_scores_current_order():
+    # Naive = predict no movement: score is strictly decreasing in current
+    # position, so P1 (lowest position) gets the highest score.
+    df = pl.DataFrame({
+        "session_key": [0, 0, 0, 0],
+        "snapshot_lap": [20, 20, 20, 20],
+        "driver_number": [44, 1, 16, 55],
+        "position": [-1.5, -0.4, 0.6, 1.7],   # standardised but monotonic
+        "final_position": [2, 1, 4, 3],
+    })
+    from f1_predictor.models.baseline_gbm import naive_predict
+    scores = naive_predict(df)
+    order = df.with_columns(pl.Series("score", scores)).sort("score", descending=True)
+    assert order["driver_number"].to_list() == [44, 1, 16, 55]
