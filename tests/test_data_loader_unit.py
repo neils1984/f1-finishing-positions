@@ -1,12 +1,25 @@
 """Unit tests for the Transformer snapshot data loader."""
 import polars as pl
-import pytest
+import torch
 
 from f1_predictor.data_loader import (
+    PAD_FINAL_POSITION,
     UNKNOWN_DRIVER_INDEX,
     build_driver_index,
     prepare_split,
+    snapshot_to_tensors,
 )
+
+
+def _group(n):
+    df = pl.DataFrame({
+        "session_key": [5] * n, "snapshot_lap": [30] * n,
+        "driver_number": list(range(1, n + 1)),
+        "final_position": list(range(1, n + 1)),
+        "position": [float(p) for p in range(1, n + 1)],
+        "f0": [float(p) for p in range(1, n + 1)], "f1": [0.0] * n,
+    })
+    return prepare_split(df)
 
 
 # --- build_driver_index (carried over from the 2026-06-08 plan) ---------------
@@ -49,3 +62,25 @@ def test_prepare_split_adds_current_rank_and_delta():
     # delta = current_rank - final_position
     by_drv = {r["driver_number"]: r["delta"] for r in out.iter_rows(named=True)}
     assert by_drv[44] == 0.0 and by_drv[1] == -1.0 and by_drv[11] == 1.0
+
+
+# --- snapshot_to_tensors: padded delta-regression tensors ---------------------
+
+def test_tensors_pad_and_carry_delta_currentrank():
+    t = snapshot_to_tensors(_group(3), ["f0", "f1"], {1: 1, 2: 2, 3: 3}, num_slots=20)
+    assert t["features"].shape == (20, 2)
+    assert t["valid"].sum().item() == 3
+    assert t["current_rank"][0].item() == 1.0
+    assert t["delta"][0].item() == 0.0            # P1 stays P1
+    assert t["final_position"][5].item() == PAD_FINAL_POSITION
+    assert torch.all(t["features"][3:] == 0)
+    # padded slots: driver_idx + driver_number are 0
+    assert t["driver_idx"][5].item() == 0
+    assert t["driver_number"][5].item() == 0
+
+
+def test_unknown_driver_maps_to_zero():
+    t = snapshot_to_tensors(_group(2), ["f0", "f1"], {1: 1}, num_slots=20)  # driver 2 unseen
+    assert t["driver_idx"][0].item() == 1 and t["driver_idx"][1].item() == 0
+    # raw driver_number is preserved regardless of embedding-index fallback
+    assert t["driver_number"][1].item() == 2
