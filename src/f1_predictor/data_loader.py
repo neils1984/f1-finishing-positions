@@ -11,8 +11,12 @@ downstream as predicted_delta - current_rank.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import polars as pl
 import torch
+from torch.utils.data import Dataset
 
 from f1_predictor.models.baseline_gbm import add_current_rank
 
@@ -102,3 +106,47 @@ def snapshot_to_tensors(
         "session_key": int(group["session_key"][0]),
         "snapshot_lap": int(group["snapshot_lap"][0]),
     }
+
+
+class SnapshotDataset(Dataset):
+    """One item per (session_key, snapshot_lap) group of a snapshot split.
+
+    `prepare_split` is applied on construction so every group carries
+    current_rank + delta before it is packed into tensors.
+    """
+
+    def __init__(
+        self,
+        df: pl.DataFrame,
+        feature_columns: list[str],
+        driver_index: dict[int, int],
+        num_slots: int,
+    ):
+        self.feature_columns = feature_columns
+        self.driver_index = driver_index
+        self.num_slots = num_slots
+        prepared = prepare_split(df)
+        self.groups = [
+            grp
+            for _, grp in prepared.group_by(
+                ["session_key", "snapshot_lap"], maintain_order=True
+            )
+        ]
+
+    def __len__(self) -> int:
+        return len(self.groups)
+
+    def __getitem__(self, i: int) -> dict:
+        return snapshot_to_tensors(
+            self.groups[i], self.feature_columns, self.driver_index, self.num_slots
+        )
+
+
+def load_split(snapshots_dir: Path, split: str) -> pl.DataFrame:
+    """Read one split parquet (train/val/test)."""
+    return pl.read_parquet(snapshots_dir / f"{split}.parquet")
+
+
+def load_metadata(snapshots_dir: Path) -> dict:
+    """Read the snapshot metadata.json (feature_columns, scaler, etc.)."""
+    return json.loads((snapshots_dir / "metadata.json").read_text())

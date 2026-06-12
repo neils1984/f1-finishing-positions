@@ -1,10 +1,12 @@
 """Unit tests for the Transformer snapshot data loader."""
 import polars as pl
 import torch
+from torch.utils.data import DataLoader
 
 from f1_predictor.data_loader import (
     PAD_FINAL_POSITION,
     UNKNOWN_DRIVER_INDEX,
+    SnapshotDataset,
     build_driver_index,
     prepare_split,
     snapshot_to_tensors,
@@ -84,3 +86,27 @@ def test_unknown_driver_maps_to_zero():
     assert t["driver_idx"][0].item() == 1 and t["driver_idx"][1].item() == 0
     # raw driver_number is preserved regardless of embedding-index fallback
     assert t["driver_number"][1].item() == 2
+
+
+# --- SnapshotDataset + DataLoader batching ------------------------------------
+
+def _multi_race(keys):
+    return pl.concat([
+        _group(3).with_columns(pl.lit(k).alias("session_key")) for k in keys
+    ])
+
+
+def test_snapshot_dataset_one_item_per_group():
+    df = _multi_race([1, 2])
+    ds = SnapshotDataset(df, ["f0", "f1"], {1: 1, 2: 2, 3: 3}, num_slots=20)
+    assert len(ds) == 2  # two (session_key, snapshot_lap) groups
+
+
+def test_dataloader_batches_stack_delta_and_currentrank():
+    df = _multi_race([1, 2, 3])
+    ds = SnapshotDataset(df, ["f0", "f1"], {1: 1, 2: 2, 3: 3}, num_slots=20)
+    batch = next(iter(DataLoader(ds, batch_size=2)))
+    assert batch["features"].shape == (2, 20, 2)
+    assert batch["valid"].shape == (2, 20)
+    assert batch["delta"].shape == (2, 20)
+    assert batch["current_rank"].shape == (2, 20)
