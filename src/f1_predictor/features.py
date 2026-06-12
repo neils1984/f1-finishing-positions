@@ -20,6 +20,10 @@ FEATURE_COLUMNS = [
     "st_speed_delta_to_field",
     "sector1_time_delta_to_field", "sector2_time_delta_to_field",
     "sector3_time_delta_to_field",
+    "tyre_deg_slope",
+    "gap_to_leader_delta_3lap", "interval_to_ahead_delta_3lap",
+    "interval_to_behind", "interval_to_behind_delta_3lap",
+    "in_striking_distance",
     "tyre_soft", "tyre_medium", "tyre_hard", "tyre_inter", "tyre_wet",
     "tyre_age_laps", "stint_number", "stops_vs_median",
     "sc_active", "vsc_active", "red_flag_active", "laps_since_sc_end",
@@ -461,6 +465,8 @@ def build_features(
     df = _add_gaps_ahead(df)
     df = _add_rolling_pace(df)
     df = _add_speed_sector_deltas(df)
+    df = _add_tyre_deg_slope(df)
+    df = _add_gap_trends(df)
     df = _add_tyre_onehot(df)
     df = _add_stops_vs_median(df)
     df = df.with_columns(pl.lit(is_street_circuit(circuit, circuits)).alias("is_street_circuit"))

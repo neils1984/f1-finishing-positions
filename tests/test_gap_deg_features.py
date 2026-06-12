@@ -82,3 +82,13 @@ def test_gap_trends_3lap_deltas():
     assert r4["gap_to_leader_delta_3lap"][0] == pytest.approx(1.6)       # 11.6-10.0
     # lap 3 has only 2 prior laps -> shift(3) is null
     assert out.filter(pl.col("lap_number") == 3)["interval_to_ahead_delta_3lap"][0] is None
+
+
+def test_new_features_in_feature_columns():
+    for f in [
+        "tyre_deg_slope",
+        "gap_to_leader_delta_3lap", "interval_to_ahead_delta_3lap",
+        "interval_to_behind", "interval_to_behind_delta_3lap",
+        "in_striking_distance",
+    ]:
+        assert f in FEATURE_COLUMNS
