@@ -98,6 +98,42 @@ def test_run_baseline_end_to_end(tmp_path):
     assert result["metrics"]["spearman"] > 0.9
 
 
+def test_train_baseline_accepts_sample_weight():
+    # Weighting must be plumbed to LightGBM; a model trained with non-uniform
+    # weights should still fit (smoke test that the kwarg is accepted and shapes
+    # line up).
+    import numpy as np
+    from f1_predictor.models.baseline_gbm import train_baseline
+    df = pl.DataFrame({
+        "session_key": [0, 0, 0, 1, 1, 1],
+        "snapshot_lap": [30] * 6,
+        "driver_number": [1, 2, 3, 1, 2, 3],
+        "position": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+        "final_position": [1, 2, 3, 3, 2, 1],
+    })
+    w = np.array([1.0, 1.0, 1.0, 5.0, 5.0, 5.0])
+    model = train_baseline(df, feature_columns=["position"],
+                           params={"num_leaves": 7, "min_data_in_leaf": 1, "n_estimators": 10},
+                           sample_weight=w)
+    assert model.num_trees() > 0
+
+
+def test_season_weights_upweights_2026():
+    from f1_predictor.models.baseline_gbm import season_weights
+    df = pl.DataFrame({"season": [2024, 2025, 2026]})
+    w = season_weights(df, upweight_2026=4.0)
+    assert list(w) == [1.0, 1.0, 4.0]
+
+
+def test_blend_scores_interpolates():
+    import numpy as np
+    from f1_predictor.models.baseline_gbm import blend_scores
+    naive = np.array([-1.0, -2.0, -3.0])
+    model = np.array([-3.0, -2.0, -1.0])
+    out = blend_scores(naive, model, alpha=0.25)
+    assert np.allclose(out, 0.75 * naive + 0.25 * model)
+
+
 def test_naive_predict_scores_current_order():
     # Naive = predict no movement: score is strictly decreasing in current
     # position, so P1 (lowest position) gets the highest score.

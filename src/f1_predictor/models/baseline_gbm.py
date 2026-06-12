@@ -64,13 +64,35 @@ def _delta_target(df: pl.DataFrame) -> pl.Series:
     return (df["current_rank"] - df["final_position"]).cast(pl.Float64)
 
 
+def season_weights(df: pl.DataFrame, upweight_2026: float) -> np.ndarray:
+    """Per-row training weights: 2026 rows get upweight_2026, others 1.0.
+
+    Requires a `season` column on df. The simplest regime-recency lever — sweep
+    upweight_2026 in the backtest to trade old-data volume against 2026 focus.
+    """
+    return np.where(df["season"].to_numpy() >= 2026, float(upweight_2026), 1.0)
+
+
+def blend_scores(naive: np.ndarray, model: np.ndarray, alpha: float) -> np.ndarray:
+    """Convex blend of naive and model ranking scores (both ~ -finish position).
+
+    alpha=0 is pure naive (the strong 2026 baseline); alpha=1 is pure model.
+    """
+    return (1.0 - alpha) * naive + alpha * model
+
+
 def train_baseline(
     train: pl.DataFrame,
     feature_columns: list[str],
     params: dict | None = None,
     valid: pl.DataFrame | None = None,
+    sample_weight: np.ndarray | None = None,
 ) -> lgb.Booster:
-    """Train an L1 delta-regression booster. Returns the fitted Booster."""
+    """Train an L1 delta-regression booster. Returns the fitted Booster.
+
+    `sample_weight` (per training row, aligned to `train`'s order) is passed
+    through to LightGBM; None means uniform weighting.
+    """
     train = add_current_rank(train)
     p = {**_DEFAULT_PARAMS, **(params or {})}
     n_estimators = p.pop("n_estimators")
@@ -78,6 +100,7 @@ def train_baseline(
     dtrain = lgb.Dataset(
         train.select(feature_columns).to_numpy(),
         label=_delta_target(train).to_numpy(),
+        weight=sample_weight,
         feature_name=list(feature_columns),
     )
     valid_sets = [dtrain]
