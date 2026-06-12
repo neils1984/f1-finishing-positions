@@ -280,6 +280,108 @@ def _add_rolling_pace(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _add_tyre_deg_slope(df: pl.DataFrame) -> pl.DataFrame:
+    """tyre_deg_slope: OLS slope (sec/lap) of lap_time vs tyre_age_laps over the
+    current stint, using clean racing laps up to and including the current lap.
+
+    Positive = pace worsening as the tyre ages (degrading); ~0 = holding on;
+    negative = still improving (early-stint warm-up / fuel burn). Causal: an
+    expanding window within each (driver, stint) ordered by lap, so the lap-N
+    value uses only laps <= N. Pit-out, SC, VSC and red-flag laps are excluded
+    (far slower, they distort a slope); null until >=3 clean laps exist in the
+    stint so far. Implemented with masked cumulative sums:
+        slope = (n*Sxy - Sx*Sy) / (n*Sxx - Sx^2).
+    """
+    clean = (
+        ~pl.col("pit_this_lap").fill_null(False)
+        & ~pl.col("sc_active").fill_null(False)
+        & ~pl.col("vsc_active").fill_null(False)
+        & ~pl.col("red_flag_active").fill_null(False)
+        & pl.col("tyre_age_laps").is_not_null()
+        & pl.col("lap_time").is_not_null()
+        & pl.col("stint_number").is_not_null()
+    )
+    x = pl.col("tyre_age_laps").cast(pl.Float64)
+    y = pl.col("lap_time").cast(pl.Float64)
+
+    df = df.sort(["driver_number", "stint_number", "lap_number"]).with_columns([
+        pl.when(clean).then(1.0).otherwise(0.0).alias("_n1"),
+        pl.when(clean).then(x).otherwise(0.0).alias("_x"),
+        pl.when(clean).then(y).otherwise(0.0).alias("_y"),
+        pl.when(clean).then(x * x).otherwise(0.0).alias("_xx"),
+        pl.when(clean).then(x * y).otherwise(0.0).alias("_xy"),
+    ])
+
+    grp = ["driver_number", "stint_number"]
+    df = df.with_columns([
+        pl.col("_n1").cum_sum().over(grp).alias("_n"),
+        pl.col("_x").cum_sum().over(grp).alias("_sx"),
+        pl.col("_y").cum_sum().over(grp).alias("_sy"),
+        pl.col("_xx").cum_sum().over(grp).alias("_sxx"),
+        pl.col("_xy").cum_sum().over(grp).alias("_sxy"),
+    ])
+
+    denom = pl.col("_n") * pl.col("_sxx") - pl.col("_sx") ** 2
+    slope = (pl.col("_n") * pl.col("_sxy") - pl.col("_sx") * pl.col("_sy")) / denom
+    df = df.with_columns(
+        pl.when((pl.col("_n") >= 3) & (denom.abs() > 1e-9))
+        .then(slope)
+        .otherwise(None)
+        .alias("tyre_deg_slope")
+    )
+    return df.drop(["_n1", "_x", "_y", "_xx", "_xy",
+                    "_n", "_sx", "_sy", "_sxx", "_sxy"])
+
+
+def _add_gap_trends(df: pl.DataFrame) -> pl.DataFrame:
+    """Gap dynamics: 3-lap trends, gap to the car behind, and a proximity flag.
+
+    `gap_to_leader` (gap to P1) and `interval_to_ahead` (gap to the car directly
+    ahead) are already Float64 here — _parse_gap_columns ran first, so lapped
+    markers ('+1 LAP') are null. All features are causal: shift(3) looks only at
+    past laps; the rest are current-lap.
+
+      gap_to_leader_delta_3lap       gap_to_leader[N] - [N-3]   (>0 dropping back)
+      interval_to_ahead_delta_3lap   interval_to_ahead[N] - [N-3] (<0 closing in)
+      interval_to_behind             gap to the car directly behind (= that car's
+                                     interval_to_ahead); null for last place
+      interval_to_behind_delta_3lap  change in gap-to-behind (<0 = being caught)
+      in_striking_distance           1 if interval_to_ahead < 1.0 s else 0
+                                     (era-agnostic; replaces the old DRS-range idea)
+    """
+    # The car at position P+1 has interval_to_ahead == its gap up to P, i.e. P's
+    # gap to the car behind. Mirror the _add_pace_deltas self-join; dedupe to one
+    # row per (lap, position) so a Stage 2 asof-join position tie can't fan out.
+    look = (
+        df.select(["lap_number", "position", "driver_number", "interval_to_ahead"])
+        .sort(["lap_number", "position", "driver_number"])
+        .unique(subset=["lap_number", "position"], keep="first", maintain_order=True)
+        .select(["lap_number", "position", "interval_to_ahead"])
+        .rename({"position": "_pos_join", "interval_to_ahead": "_ivl_behind"})
+    )
+    df = (
+        df.with_columns((pl.col("position") + 1).alias("_behind_pos"))
+        .join(look, left_on=["lap_number", "_behind_pos"],
+              right_on=["lap_number", "_pos_join"], how="left")
+        .rename({"_ivl_behind": "interval_to_behind"})
+        .drop("_behind_pos")
+    )
+
+    return df.sort(["driver_number", "lap_number"]).with_columns([
+        (pl.col("gap_to_leader")
+         - pl.col("gap_to_leader").shift(3).over("driver_number"))
+        .alias("gap_to_leader_delta_3lap"),
+        (pl.col("interval_to_ahead")
+         - pl.col("interval_to_ahead").shift(3).over("driver_number"))
+        .alias("interval_to_ahead_delta_3lap"),
+        (pl.col("interval_to_behind")
+         - pl.col("interval_to_behind").shift(3).over("driver_number"))
+        .alias("interval_to_behind_delta_3lap"),
+        (pl.col("interval_to_ahead") < 1.0).fill_null(False).cast(pl.Int8)
+        .alias("in_striking_distance"),
+    ])
+
+
 # Source column (from Stage 2 passthrough) -> field-relative feature name.
 _SPEED_SECTOR_SOURCES = {
     "st_speed": "st_speed_delta_to_field",
