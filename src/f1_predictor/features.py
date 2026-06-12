@@ -17,6 +17,9 @@ FEATURE_COLUMNS = [
     "rolling_lap_time_3_norm", "rolling_lap_time_3_delta_leader",
     "last_lap_pace_delta_to_ahead", "last_lap_pace_delta_to_behind",
     "mean_gap_cars_ahead", "stdev_gap_cars_ahead", "max_speed_kmh",
+    "st_speed_delta_to_field",
+    "sector1_time_delta_to_field", "sector2_time_delta_to_field",
+    "sector3_time_delta_to_field",
     "tyre_soft", "tyre_medium", "tyre_hard", "tyre_inter", "tyre_wet",
     "tyre_age_laps", "stint_number", "stops_vs_median",
     "sc_active", "vsc_active", "red_flag_active", "laps_since_sc_end",
@@ -277,6 +280,46 @@ def _add_rolling_pace(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+# Source column (from Stage 2 passthrough) -> field-relative feature name.
+_SPEED_SECTOR_SOURCES = {
+    "st_speed": "st_speed_delta_to_field",
+    "duration_sector_1": "sector1_time_delta_to_field",
+    "duration_sector_2": "sector2_time_delta_to_field",
+    "duration_sector_3": "sector3_time_delta_to_field",
+}
+
+
+def _add_speed_sector_deltas(df: pl.DataFrame) -> pl.DataFrame:
+    """Field-relative speed-trap and sector-time deltas (driver minus field median).
+
+    Each feature = the driver's value on that lap minus the per-lap median across
+    the field (median ignores nulls). st_speed higher than the field is a positive
+    delta (straightline / deployment advantage — the era-agnostic overtaking proxy
+    now that DRS is gone in 2026); sector times lower than the field are negative
+    (quicker through that part of the track). Subtracting the same-lap field median
+    cancels circuit/era scale and track-wide effects (SC, fuel load). A null source
+    value yields a null delta; a missing source column yields an all-null feature.
+    """
+    present = [s for s in _SPEED_SECTOR_SOURCES if s in df.columns]
+    if not present:
+        return df.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias(o)
+            for o in _SPEED_SECTOR_SOURCES.values()
+        ])
+
+    med = df.group_by("lap_number").agg([
+        pl.col(s).cast(pl.Float64).median().alias(f"_med_{s}") for s in present
+    ])
+    df = df.join(med, on="lap_number", how="left")
+    df = df.with_columns([
+        (pl.col(s).cast(pl.Float64) - pl.col(f"_med_{s}")).alias(_SPEED_SECTOR_SOURCES[s])
+        if s in present
+        else pl.lit(None, dtype=pl.Float64).alias(_SPEED_SECTOR_SOURCES[s])
+        for s in _SPEED_SECTOR_SOURCES
+    ])
+    return df.drop([f"_med_{s}" for s in present])
+
+
 def _grid_from_position(pos_df: pl.DataFrame) -> dict[int, int]:
     """Grid position per driver = position at the earliest reading (pre-race)."""
     earliest = (
@@ -315,6 +358,7 @@ def build_features(
     df = _add_pace_deltas(df)
     df = _add_gaps_ahead(df)
     df = _add_rolling_pace(df)
+    df = _add_speed_sector_deltas(df)
     df = _add_tyre_onehot(df)
     df = _add_stops_vs_median(df)
     df = df.with_columns(pl.lit(is_street_circuit(circuit, circuits)).alias("is_street_circuit"))

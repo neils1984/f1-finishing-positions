@@ -27,13 +27,32 @@ def _read_raw(session_dir: Path) -> dict[str, pl.DataFrame]:
     return raw
 
 
+# Raw per-driver-lap columns carried verbatim from the laps endpoint for Stage 3
+# to turn into field-relative features. st_speed is the speed trap; the sector
+# durations decompose the lap. All are present 2023-2026 (era-agnostic); absent
+# in some synthetic/older frames, so they are filled null when missing.
+_LAP_PASSTHROUGH = ["st_speed", "duration_sector_1", "duration_sector_2", "duration_sector_3"]
+
+
 def _build_lap_table(laps: pl.DataFrame) -> pl.DataFrame:
-    """Select and rename columns from the laps endpoint to form the base table."""
-    return (
-        laps.select(["session_key", "driver_number", "lap_number", "date_start", "lap_duration"])
+    """Select and rename columns from the laps endpoint to form the base table.
+
+    Carries the speed-trap and sector-duration columns through verbatim (added as
+    null when the source frame lacks them); other endpoint columns are dropped.
+    """
+    present = [c for c in _LAP_PASSTHROUGH if c in laps.columns]
+    table = (
+        laps.select(
+            ["session_key", "driver_number", "lap_number", "date_start", "lap_duration"]
+            + present
+        )
         .rename({"lap_duration": "lap_time"})
         .filter(pl.col("lap_number") > 0)  # exclude formation/pit-out lap 0
     )
+    missing = [c for c in _LAP_PASSTHROUGH if c not in present]
+    if missing:
+        table = table.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in missing])
+    return table
 
 
 # %.f makes fractional seconds optional: real OpenF1 timestamps carry them
